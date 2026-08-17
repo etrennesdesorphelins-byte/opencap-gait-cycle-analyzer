@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OpenCap Gait Cycle Analyzer</title>
+</head>
+<body>
+  <div id="app">
+    <header class="app-header">
+      <h1>OpenCap Gait Cycle Analyzer</h1>
+      <p class="privacy-note">
+        選択したOpenCapデータは外部サーバーへ送信されません。解析処理はお使いのブラウザ内で実行されます。
+      </p>
+    </header>
+
+    <main>
+      <!-- Section 1: ZIP upload -->
+      <section id="section-upload" class="card">
+        <h2>1. OpenCap ZIPファイルの読み込み</h2>
+        <div id="drop-zone" class="drop-zone">
+          <p>ここにZIPファイルをドラッグ＆ドロップ、またはボタンで選択してください。</p>
+          <button id="btn-select-zip" type="button">ZIPファイルを選択</button>
+          <input id="input-zip" type="file" accept=".zip" hidden />
+        </div>
+        <p id="zip-status" class="status-text"></p>
+        <p id="zip-error" class="error-text" role="alert"></p>
+      </section>
+
+      <!-- Section 2: Trial / Side selection -->
+      <section id="section-selection" class="card" hidden>
+        <h2>2. 試行・解析側の選択</h2>
+        <div class="field-row">
+          <label for="select-trial">試行 (MOTファイル)</label>
+          <select id="select-trial"></select>
+        </div>
+        <div class="field-row">
+          <label>解析側</label>
+          <div class="radio-group">
+            <label><input type="radio" name="side" value="R" checked /> Right</label>
+            <label><input type="radio" name="side" value="L" /> Left</label>
+          </div>
+        </div>
+        <p id="selection-error" class="error-text" role="alert"></p>
+      </section>
+
+      <!-- Section 3: Video -->
+      <section id="section-video" class="card" hidden>
+        <h2>3. 同期動画</h2>
+        <div id="video-wrapper" class="video-wrapper">
+          <video id="sync-video" controls playsinline></video>
+        </div>
+        <div class="zoom-controls">
+          <button id="btn-zoom-out" type="button" aria-label="縮小">－</button>
+          <span id="zoom-level-display" class="zoom-level">100%</span>
+          <button id="btn-zoom-in" type="button" aria-label="拡大">＋</button>
+          <button id="btn-zoom-reset" type="button">リセット</button>
+        </div>
+        <p id="video-status" class="status-text"></p>
+      </section>
+
+      <!-- Section 4: Time / sample control -->
+      <section id="section-controls" class="card" hidden>
+        <h2>4. フレーム / サンプル操作</h2>
+        <div class="step-controls">
+          <button id="btn-step-back-10" type="button">-10</button>
+          <button id="btn-step-back-1" type="button">-1</button>
+          <button id="btn-step-fwd-1" type="button">+1</button>
+          <button id="btn-step-fwd-10" type="button">+10</button>
+        </div>
+        <input id="time-slider" type="range" min="0" max="0" value="0" step="1" />
+        <p id="sample-info" class="status-text">Sample: - / -</p>
+        <p id="time-info" class="status-text">MOT Time: - s / Video Time: - s</p>
+      </section>
+
+      <!-- Section 5 & 6: IC selection -->
+      <section id="section-ic" class="card" hidden>
+        <h2>5. Initial Contact (IC) の設定</h2>
+        <div class="ic-buttons">
+          <button id="btn-set-ic1" type="button">1st IC を設定</button>
+          <button id="btn-set-ic2" type="button">2nd IC を設定</button>
+        </div>
+        <div class="ic-info">
+          <p id="ic1-info">1st IC: 未設定</p>
+          <p id="ic2-info">2nd IC: 未設定</p>
+          <p id="gait-duration-info">Gait cycle duration: -</p>
+        </div>
+        <p id="ic-error" class="error-text" role="alert"></p>
+      </section>
+
+      <!-- Section 7: Analyze -->
+      <section id="section-analyze" class="card" hidden>
+        <h2>6. 解析実行</h2>
+        <button id="btn-analyze" type="button" disabled>解析実行</button>
+        <p id="analyze-error" class="error-text" role="alert"></p>
+      </section>
+
+      <!-- Section 8: Result preview -->
+      <section id="section-result" class="card" hidden>
+        <h2>7. 解析結果プレビュー</h2>
+        <div class="chart-grid">
+          <canvas id="chart-hip"></canvas>
+          <canvas id="chart-knee"></canvas>
+          <canvas id="chart-ankle"></canvas>
+        </div>
+      </section>
+
+      <!-- Section 9: Download -->
+      <section id="section-download" class="card" hidden>
+        <h2>8. Excel出力</h2>
+        <button id="btn-download-excel" type="button">Excelをダウンロード</button>
+        <p id="download-status" class="status-text"></p>
+      </section>
+    </main>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
