@@ -1,8 +1,14 @@
 import './styles/main.css';
 
 import { loadZip } from './modules/zipLoader.js';
-import { buildTrialList, loadTrialData, loadVideoBlob, loadOsimModel } from './modules/trialManager.js';
-import { computeCenterOfMassTrajectory } from './modules/bodyKinematics.js';
+import { buildTrialList, loadTrialData, loadVideoBlob, loadOsimModel, loadTrc } from './modules/trialManager.js';
+import { computeCenterOfMassTrajectory, computeMarkerTrajectories } from './modules/bodyKinematics.js';
+import {
+  analyzeSpatioTemporal,
+  SPATIOTEMPORAL_PARAMS,
+  HEEL_MARKERS,
+  PELVIS_MARKERS,
+} from './modules/spatioTemporal.js';
 import { analyzeComForSide } from './modules/comAnalysis.js';
 import { getColumn } from './modules/motParser.js';
 import { VideoGrid } from './modules/videoGrid.js';
@@ -23,7 +29,7 @@ import { buildWorkbook, downloadWorkbook } from './modules/excelExporter.js';
 import { buildExportFilename } from './utils/filename.js';
 import { clamp, round } from './utils/numbers.js';
 
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.3.0';
 
 const el = {
   dropZone: document.getElementById('drop-zone'),
@@ -36,6 +42,7 @@ const el = {
   selectTrial: document.getElementById('select-trial'),
   selectionError: document.getElementById('selection-error'),
   comStatus: document.getElementById('com-status'),
+  markerStatus: document.getElementById('marker-status'),
 
   sectionVideo: document.getElementById('section-video'),
   cameraSelectRow: document.getElementById('camera-select-row'),
@@ -68,6 +75,7 @@ const el = {
 
   sectionResult: document.getElementById('section-result'),
   resultSummary: document.getElementById('result-summary'),
+  stTableBody: document.querySelector('#st-table tbody'),
   chartHip: document.getElementById('chart-hip'),
   chartKnee: document.getElementById('chart-knee'),
   chartAnkle: document.getElementById('chart-ankle'),
@@ -103,6 +111,9 @@ const state = {
   // 選択中の試行の身体重心時系列と、算出に用いたモデルの情報（算出できない場合は null）
   com: null,
   comModel: null,
+  // 歩幅・歩行速度に用いるマーカー軌跡（TRC、なければモデルの順運動学）と、その出所
+  markers: null,
+  markerSource: null,
   analysisResult: null,
   charts: null,
 };
@@ -199,6 +210,7 @@ async function selectTrial(index) {
     }
 
     await updateCenterOfMass(trial);
+    await updateMarkers(trial);
 
     state.videoBlobCache = new Map();
     renderCameraSelect(trial);
@@ -274,6 +286,39 @@ async function updateCenterOfMass(trial) {
   } catch (err) {
     el.comStatus.textContent = `身体重心を算出できませんでした: ${err.message || err}`;
   }
+}
+
+// 歩幅（踵マーカー）と、身体重心がない場合の歩行速度（骨盤マーカー）に使うマーカー軌跡を用意する。
+// OpenCapと同じく実測のTRCを優先し、なければモデルの順運動学でマーカー位置を求める。
+async function updateMarkers(trial) {
+  state.markers = null;
+  state.markerSource = null;
+  const names = [...Object.values(HEEL_MARKERS), ...PELVIS_MARKERS];
+  try {
+    if (trial.trcPath) {
+      state.markers = await loadTrc(state.zipInstance, trial.trcPath);
+      state.markerSource = trial.trcPath;
+    } else if (trial.modelPath) {
+      const model = await getModel(trial.modelPath);
+      state.markers = computeMarkerTrajectories(model, state.motData, names);
+      state.markerSource = `${trial.modelPath} (forward kinematics)`;
+    }
+  } catch (err) {
+    el.markerStatus.textContent = `マーカーデータを読み込めませんでした: ${err.message || err}`;
+    return;
+  }
+  if (!state.markers) {
+    el.markerStatus.textContent = '歩幅: マーカーデータ(.trc)・モデルが見つからないため算出しません。';
+    return;
+  }
+  const missing = Object.values(HEEL_MARKERS).filter(
+    (n) => !Object.keys(state.markers.markers).some((k) => k.toLowerCase() === n.toLowerCase())
+  );
+  const source = trial.trcPath ? trial.trcPath.split('/').pop() : 'モデルの順運動学';
+  el.markerStatus.textContent =
+    missing.length > 0
+      ? `歩幅: 踵マーカー（${missing.join(', ')}）が見つからないため算出しません。`
+      : `歩幅: ${source} の踵マーカー（${Object.values(HEEL_MARKERS).join(', ')}）から算出します。`;
 }
 
 // ---------- Section 3: Video / camera selection ----------
@@ -574,12 +619,37 @@ function comSummaryText(side, com) {
   const parts = [
     `${SIDE_LABELS[side]}: 鉛直変位幅 ${withSD(com.verticalExcursion, 2, 'cm')}`,
     `左右変位幅 ${withSD(com.mlExcursion, 2, 'cm')}`,
-    `歩行速度 ${withSD(com.speed, 2, 'm/s')}`,
   ];
   if (com.undefinedDirectionCount > 0) {
     parts.push(`進行方向を決められない周期が ${com.undefinedDirectionCount} 件（左右・前後成分は参考値）`);
   }
   return parts.join('、');
+}
+
+// 時間・距離因子の表（行: 項目、列: 側）
+function renderSpatioTemporalTable(sides, stResults) {
+  el.stTableBody.innerHTML = '';
+  for (const param of SPATIOTEMPORAL_PARAMS) {
+    const tr = document.createElement('tr');
+    tr.appendChild(textCell(`${param.label}`));
+    for (const side of SIDES) {
+      if (!sides.includes(side)) {
+        tr.appendChild(textCell('-'));
+        continue;
+      }
+      const stat = stResults[side].summary[param.key];
+      let text = withSD(stat, param.digits, param.unit);
+      if (stat.n > 0) {
+        text += `（n=${stat.n}）`;
+        if (param.percentKey) {
+          const pctStat = stResults[side].summary[param.percentKey];
+          text += ` / ${fmt(pctStat.mean)}%`;
+        }
+      }
+      tr.appendChild(textCell(text));
+    }
+    el.stTableBody.appendChild(tr);
+  }
 }
 
 el.btnAnalyze.addEventListener('click', () => {
@@ -597,6 +667,11 @@ el.btnAnalyze.addEventListener('click', () => {
   sides.forEach((side) => {
     sideResults[side] = analyzeSide(state.motData, side, bySide[side]);
   });
+  const stResults = {};
+  sides.forEach((side) => {
+    stResults[side] = analyzeSpatioTemporal(bySide[side], { com: state.com, markers: state.markers });
+  });
+
   let comResults = null;
   if (state.com) {
     comResults = {};
@@ -606,8 +681,10 @@ el.btnAnalyze.addEventListener('click', () => {
   }
   state.analysisResult = {
     sideResults,
+    stResults,
     comResults,
     comModel: state.comModel,
+    markerSource: state.markerSource,
     sides,
     events: state.events.map((e) => ({ ...e })),
   };
@@ -672,6 +749,8 @@ el.btnAnalyze.addEventListener('click', () => {
     }
   });
 
+  renderSpatioTemporalTable(sides, stResults);
+
   showSection(el.sectionDownload, true);
   el.downloadStatus.textContent = '';
 });
@@ -684,7 +763,7 @@ el.btnDownloadExcel.addEventListener('click', async () => {
   el.downloadStatus.textContent = 'Excelを生成中...';
 
   try {
-    const { sideResults, comResults, comModel, sides, events } = state.analysisResult;
+    const { sideResults, stResults, comResults, comModel, markerSource, sides, events } = state.analysisResult;
 
     const chartImages = {};
     for (const [key, chart] of Object.entries(state.charts)) {
@@ -704,6 +783,10 @@ el.btnDownloadExcel.addEventListener('click', async () => {
       'Normalization points': 101,
       'Interpolation method': 'linear',
       'SD definition': 'Sample SD (n-1), across cycles',
+      'Step length marker source': markerSource || '(not available)',
+      'Walking speed reference': comModel ? 'Body COM' : 'Pelvis marker center (ASIS/PSIS)',
+      'Spatiotemporal definitions':
+        'Step length = progression distance from contralateral heel (*_calc_study) at contralateral IC to ipsilateral heel at next ipsilateral IC; Stance = IC to TO; Swing = TO to next IC; Loading response = IC to contralateral TO; Pre-swing = contralateral IC to TO',
       'COM model file': comModel ? comModel.path : '(not computed)',
       'COM model total mass (kg)': comModel ? comModel.totalMass : null,
       'COM method': comModel
@@ -716,7 +799,7 @@ el.btnDownloadExcel.addEventListener('click', async () => {
       'Export date/time': new Date().toISOString(),
     };
 
-    const workbook = buildWorkbook({ chartImages, events, sideResults, comResults, metadata });
+    const workbook = buildWorkbook({ chartImages, events, sideResults, stResults, comResults, metadata });
 
     const filename = buildExportFilename(state.zipFile.name, state.selectedTrial.motName);
     await downloadWorkbook(workbook, filename);

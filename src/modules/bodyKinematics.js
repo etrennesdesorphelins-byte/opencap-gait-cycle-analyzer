@@ -67,6 +67,18 @@ export function computeMarkerPositions(model, poses) {
   return out;
 }
 
+// 指定したモデルマーカーの軌跡を順運動学で求める（TRCがない場合の代替）。戻り値は parseTrc と同じ形
+export function computeMarkerTrajectories(model, motData, names) {
+  const wanted = model.markers.filter((m) => names.some((n) => n.toLowerCase() === m.name.toLowerCase()));
+  const { frames } = coordinateFramesFromMot(model, motData);
+  const markers = Object.fromEntries(wanted.map((m) => [m.name, []]));
+  for (const q of frames) {
+    const poses = computeBodyTransforms(model, q);
+    for (const m of wanted) markers[m.name].push(transformPoint(poses.get(m.body), m.location));
+  }
+  return { time: getColumn(motData, 'time'), markers };
+}
+
 // 中心差分（両端は片側差分）で時系列の微分を求める
 function differentiate(time, values) {
   const n = values.length;

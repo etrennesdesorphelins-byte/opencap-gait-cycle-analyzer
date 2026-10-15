@@ -3,9 +3,7 @@
 // そのため周期ごとに、開始IC→次ICの水平COM変位の向きを前後(AP)軸、AP×鉛直を左右(ML, 右が正)軸とする。
 
 import { normalizeTo101Points, meanAndSD, scalarMeanSD } from './normalizer.js';
-
-// 進行方向を決めるのに必要な最小の水平変位 [m]（足踏みやトレッドミルでは方向を決められない）
-const MIN_PROGRESSION = 0.05;
+import { progressionFrame } from '../utils/progression.js';
 
 export const COM_SERIES = [
   // 原点基準の位置。鉛直は地面座標系の y（OpenCapでは床がほぼ y=0）、
@@ -32,14 +30,10 @@ function analyzeCycle(com, cycle) {
   const t1 = time[time.length - 1];
   const pct = time.map((t) => ((t - t0) / (t1 - t0)) * 100);
 
-  // 進行方向（水平面 x-z）
-  const dx = com.x[end] - com.x[start];
-  const dz = com.z[end] - com.z[start];
-  const progression = Math.hypot(dx, dz);
-  const directionDefined = progression >= MIN_PROGRESSION;
-  const fwd = directionDefined ? [dx / progression, dz / progression] : [1, 0];
-  // 右方向 = 前方 × 上方（OpenSimの右手系: x前方, y上方 → z右方）
-  const right = [-fwd[1], fwd[0]];
+  const { defined: directionDefined, fwd, right } = progressionFrame(
+    [com.x[start], com.y[start], com.z[start]],
+    [com.x[end], com.y[end], com.z[end]]
+  );
 
   const xs = idx.map((i) => com.x[i]);
   const ys = idx.map((i) => com.y[i]);
@@ -74,7 +68,6 @@ function analyzeCycle(com, cycle) {
     normalizedAbsolute,
     verticalExcursion: range(series.vertical),
     mlExcursion: range(series.ml),
-    speed: directionDefined ? progression / (t1 - t0) : null,
   };
 }
 
@@ -90,7 +83,6 @@ export function analyzeComForSide(com, cycles) {
     summary,
     verticalExcursion: scalarMeanSD(perCycle.map((c) => c.verticalExcursion)),
     mlExcursion: scalarMeanSD(perCycle.map((c) => c.mlExcursion)),
-    speed: scalarMeanSD(perCycle.map((c) => c.speed)),
     undefinedDirectionCount: perCycle.filter((c) => !c.directionDefined).length,
   };
 }

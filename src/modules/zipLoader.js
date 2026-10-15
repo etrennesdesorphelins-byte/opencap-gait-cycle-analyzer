@@ -125,6 +125,14 @@ export function findModelForMot(zip, motPath) {
   return shared;
 }
 
+// MOTに対応するマーカーデータ {root}MarkerData/{trial}.trc を探す
+export function findTrcForMot(zip, motPath) {
+  const base = baseNameWithoutExt(motPath).toLowerCase();
+  const target = `${extractRootPrefix(motPath).toLowerCase()}markerdata/${base}.trc`;
+  const entry = buildEntryIndex(zip).get(target);
+  return entry ? entry.name : null;
+}
+
 export async function extractText(zip, path) {
   const entry = zip.file(path);
   if (!entry) {

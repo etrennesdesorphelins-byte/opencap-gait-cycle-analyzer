@@ -37,6 +37,7 @@
         </div>
         <p class="status-text">解析は左右それぞれ、設定した歩行イベントから自動で行います。</p>
         <p id="com-status" class="status-text"></p>
+        <p id="marker-status" class="status-text"></p>
         <p id="selection-error" class="error-text" role="alert"></p>
       </section>
 
@@ -129,6 +130,20 @@
           <canvas id="chart-knee"></canvas>
           <canvas id="chart-ankle"></canvas>
         </div>
+        <h3 class="subheading">時間・距離因子</h3>
+        <div class="table-scroll">
+          <table id="st-table" class="data-table">
+            <thead>
+              <tr><th>項目</th><th class="side-text-R">Right</th><th class="side-text-L">Left</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p id="st-note" class="status-text">
+          平均 ± SD（n = 有効な周期数）。「/」の後は歩行周期に対する割合（%GC）。歩幅は同側IC時の同側踵マーカーと直前の対側IC時の対側踵マーカーの進行方向距離、
+          荷重応答期は IC→対側Toe Off、前遊脚期は対側IC→同側Toe Off。
+        </p>
+
         <div id="com-result" hidden>
           <h3 class="subheading">身体重心 (COM)</h3>
           <div id="com-summary" class="result-summary"></div>

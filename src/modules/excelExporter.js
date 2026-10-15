@@ -1,6 +1,7 @@
 import ExcelJS from 'exceljs';
 import { SIDE_VARIABLES } from './validators.js';
 import { COM_SERIES } from './comAnalysis.js';
+import { SPATIOTEMPORAL_PARAMS } from './spatioTemporal.js';
 
 const IMAGE_ROW_POSITIONS = { hip: 1, knee: 22, ankle: 43, comVertical: 64, comMl: 85 };
 const JOINTS = [
@@ -13,9 +14,10 @@ const SIDE_NAMES = { R: 'Right', L: 'Left' };
 const blankIfNull = (v) => (v === null || v === undefined ? null : v);
 
 // sideResults: { R?: analyzeSide結果, L?: analyzeSide結果 }
+// stResults: { R?: analyzeSpatioTemporal結果, L?: ... }
 // comResults: { R?: analyzeComForSide結果, L?: ... } または null（身体重心を算出できなかった場合）
 // events: gaitEvents の記録（時刻順）
-export function buildWorkbook({ chartImages, events, sideResults, comResults, metadata }) {
+export function buildWorkbook({ chartImages, events, sideResults, stResults, comResults, metadata }) {
   const workbook = new ExcelJS.Workbook();
   workbook.creator = 'OpenCap Gait Cycle Analyzer';
   workbook.created = new Date();
@@ -68,11 +70,12 @@ export function buildWorkbook({ chartImages, events, sideResults, comResults, me
     { header: 'Swing (%)', key: 'swing', width: 11 },
     { header: 'Opposite Toe Off (%)', key: 'oppTo', width: 19 },
     { header: 'Opposite IC (%)', key: 'oppIc', width: 15 },
+    // 立脚/遊脚の%GCは既存の Stance (%) / Swing (%) 列と同じ値なので重複させない
+    ...ST_COLUMNS.filter((c) => c.key !== 'stancePercent' && c.key !== 'swingPercent').map((c) => ({ header: c.header, key: c.key, width: Math.max(14, c.header.length + 2) })),
     ...(comResults
       ? [
           { header: 'COM vertical excursion (cm)', key: 'comV', width: 25 },
           { header: 'COM ML excursion (cm)', key: 'comMl', width: 21 },
-          { header: 'Walking speed (m/s)', key: 'speed', width: 19 },
         ]
       : []),
   ];
@@ -93,6 +96,7 @@ export function buildWorkbook({ chartImages, events, sideResults, comResults, me
         swing: blankIfNull(c.swingPercent),
         oppTo: blankIfNull(c.oppositeToeOffPercent),
         oppIc: blankIfNull(c.oppositeICPercent),
+        ...stValues((key) => stResults[side].cycles[c.number - 1][key]),
         ...(comResults ? comCycleValues(comResults[side].cycles[c.number - 1]) : {}),
       });
     });
@@ -106,13 +110,36 @@ export function buildWorkbook({ chartImages, events, sideResults, comResults, me
         swing: stance[pick] === null ? null : pick === 'mean' ? 100 - stance.mean : stance.sd,
         oppTo: blankIfNull(result.oppositeToeOffPercent[pick]),
         oppIc: blankIfNull(result.oppositeICPercent[pick]),
+        ...stValues((key) => stResults[side].summary[key][pick]),
         ...(comResults ? comSummaryValues(comResults[side], pick) : {}),
       });
       row.font = { bold: true };
     }
   });
 
-  // Sheet 4: Normalized_Data（側ごとの平均/SDと、各周期の101点正規化データ）
+  // Sheet 4: Spatiotemporal（時間・距離因子の側ごとの平均/SD）
+  const stSheet = workbook.addWorksheet('Spatiotemporal');
+  stSheet.columns = [
+    { header: 'Parameter', key: 'param', width: 26 },
+    { header: 'Unit', key: 'unit', width: 8 },
+    ...sides.flatMap((side) => [
+      { header: `${SIDE_NAMES[side]} mean`, key: `${side}_mean`, width: 13 },
+      { header: `${SIDE_NAMES[side]} SD`, key: `${side}_sd`, width: 12 },
+      { header: `${SIDE_NAMES[side]} n`, key: `${side}_n`, width: 9 },
+    ]),
+  ];
+  ST_COLUMNS.forEach((col) => {
+    const row = { param: col.label, unit: col.unit };
+    sides.forEach((side) => {
+      const stat = stResults[side].summary[col.key];
+      row[`${side}_mean`] = blankIfNull(stat.mean);
+      row[`${side}_sd`] = blankIfNull(stat.sd);
+      row[`${side}_n`] = stat.n;
+    });
+    stSheet.addRow(row);
+  });
+
+  // Sheet 5: Normalized_Data（側ごとの平均/SDと、各周期の101点正規化データ）
   const normSheet = workbook.addWorksheet('Normalized_Data');
   const normColumns = [{ header: 'Gait cycle (%)', key: 'pct', width: 14 }];
   sides.forEach((side) => {
@@ -146,7 +173,7 @@ export function buildWorkbook({ chartImages, events, sideResults, comResults, me
     normSheet.addRow(row);
   }
 
-  // Sheet 5: Original_Data（各周期の正規化前データ、縦持ち）
+  // Sheet 6: Original_Data（各周期の正規化前データ、縦持ち）
   const origSheet = workbook.addWorksheet('Original_Data');
   origSheet.columns = [
     { header: 'Side', key: 'side', width: 8 },
@@ -176,7 +203,7 @@ export function buildWorkbook({ chartImages, events, sideResults, comResults, me
     });
   });
 
-  // Sheet 6: Metadata
+  // Sheet 7: Metadata
   const metaSheet = workbook.addWorksheet('Metadata');
   metaSheet.columns = [
     { header: 'Parameter', key: 'param', width: 24 },
@@ -191,7 +218,7 @@ export function buildWorkbook({ chartImages, events, sideResults, comResults, me
     metaSheet.addRow({ param: `${SIDE_NAMES[side]} cycles`, value: sideResults[side].cycles.length });
   });
 
-  // Sheet 7: Normalized_All_Data（MOTファイルの全変数を周期ごとに101点正規化したもの、縦持ち）
+  // Sheet 8: Normalized_All_Data（MOTファイルの全変数を周期ごとに101点正規化したもの、縦持ち）
   const allVariableNames = sides.length > 0 ? sideResults[sides[0]].cycles[0].allNormalized.variableNames : [];
   const allSheet = workbook.addWorksheet('Normalized_All_Data');
   allSheet.columns = [
@@ -212,7 +239,7 @@ export function buildWorkbook({ chartImages, events, sideResults, comResults, me
     });
   });
 
-  // Sheet 8: COM_Normalized（身体重心。側ごとの平均/SDと、各周期の101点正規化データ）
+  // Sheet 9: COM_Normalized（身体重心。側ごとの平均/SDと、各周期の101点正規化データ）
   if (comResults) {
     const comSheet = workbook.addWorksheet('COM_Normalized');
     const columns = [{ header: 'Gait cycle (%)', key: 'pct', width: 14 }];
@@ -257,15 +284,26 @@ export function buildWorkbook({ chartImages, events, sideResults, comResults, me
   return workbook;
 }
 
+// 時間・距離因子の列（秒/距離の列と、%GCの列）
+const ST_COLUMNS = SPATIOTEMPORAL_PARAMS.flatMap((p) => [
+  { key: p.key, label: p.en, unit: p.unit, header: `${p.en} (${p.unit})` },
+  ...(p.percentKey
+    ? [{ key: p.percentKey, label: `${p.en.replace(/ time$/, '')} (%GC)`, unit: '%', header: `${p.en.replace(/ time$/, '')} (%GC)` }]
+    : []),
+]);
+
+function stValues(get) {
+  return Object.fromEntries(ST_COLUMNS.map((c) => [c.key, blankIfNull(get(c.key))]));
+}
+
 function comCycleValues(c) {
-  return { comV: c.verticalExcursion, comMl: c.mlExcursion, speed: blankIfNull(c.speed) };
+  return { comV: c.verticalExcursion, comMl: c.mlExcursion };
 }
 
 function comSummaryValues(r, pick) {
   return {
     comV: blankIfNull(r.verticalExcursion[pick]),
     comMl: blankIfNull(r.mlExcursion[pick]),
-    speed: blankIfNull(r.speed[pick]),
   };
 }
 
