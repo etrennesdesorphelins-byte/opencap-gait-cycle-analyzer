@@ -366,3 +366,25 @@ button.danger:hover:not(:disabled) {
   margin: 4px 0;
   font-weight: 600;
 }
+
+.current-zip {
+  font-weight: 600;
+  margin: 0 0 12px;
+}
+
+.dataset-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.data-table td.wrap {
+  white-space: normal;
+}
+
+.data-table td.filename {
+  word-break: break-all;
+  min-width: 140px;
+}

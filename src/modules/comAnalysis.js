@@ -71,9 +71,13 @@ function analyzeCycle(com, cycle) {
   };
 }
 
-// side の各周期についてCOMを解析し、周期間の平均±SDをまとめる
-export function analyzeComForSide(com, cycles) {
-  const perCycle = cycles.map((c) => analyzeCycle(com, c));
+// 1試行の各周期についてCOMを解析する
+export function analyzeComCycles(com, cycles) {
+  return cycles.map((c) => analyzeCycle(com, c));
+}
+
+// COM解析済みの周期（複数試行から集めたものでもよい）の周期間の平均±SDをまとめる
+export function summarizeCom(perCycle) {
   const summary = {};
   for (const { key } of COM_SERIES) {
     summary[key] = meanAndSD(perCycle.map((c) => c.normalized[key]));

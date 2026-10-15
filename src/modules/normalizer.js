@@ -135,14 +135,17 @@ export function scalarMeanSD(values) {
   return { mean: m, sd, n: valid.length };
 }
 
-// 指定側の全歩行周期をそれぞれ101点へ正規化し、周期間の平均±SDをまとめる。
-export function analyzeSide(motData, side, cycles) {
-  const analyzedCycles = cycles.map((cycle) => {
+// 1試行の指定側の歩行周期を、それぞれ101点へ正規化する
+export function analyzeSideCycles(motData, side, cycles) {
+  return cycles.map((cycle) => {
     const { original, normalized } = normalizeGaitCycle(motData, side, cycle.start, cycle.end);
     const allNormalized = normalizeAllVariables(motData, cycle.start, cycle.end);
     return { ...cycle, original, normalized, allNormalized };
   });
+}
 
+// 正規化済みの歩行周期（複数試行・複数ZIPから集めたものでもよい）の周期間の平均±SDをまとめる
+export function summarizeSide(side, analyzedCycles) {
   const summary = {};
   for (const joint of ['hip', 'knee', 'ankle']) {
     summary[joint] = meanAndSD(analyzedCycles.map((c) => c.normalized[joint]));

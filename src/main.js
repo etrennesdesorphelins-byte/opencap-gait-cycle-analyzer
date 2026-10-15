@@ -4,12 +4,15 @@ import { loadZip } from './modules/zipLoader.js';
 import { buildTrialList, loadTrialData, loadVideoBlob, loadOsimModel, loadTrc } from './modules/trialManager.js';
 import { computeCenterOfMassTrajectory, computeMarkerTrajectories } from './modules/bodyKinematics.js';
 import {
-  analyzeSpatioTemporal,
+  computeCycleParameters,
+  computeTrialSpeed,
+  summarizeSpatioTemporal,
   SPATIOTEMPORAL_PARAMS,
+  WALKING_SPEED,
   HEEL_MARKERS,
   PELVIS_MARKERS,
 } from './modules/spatioTemporal.js';
-import { analyzeComForSide } from './modules/comAnalysis.js';
+import { analyzeComCycles, summarizeCom } from './modules/comAnalysis.js';
 import { getColumn } from './modules/motParser.js';
 import { VideoGrid } from './modules/videoGrid.js';
 import {
@@ -23,13 +26,13 @@ import {
   buildCycles,
 } from './modules/gaitEvents.js';
 import { checkAnalysisReady, checkRequiredColumns } from './modules/validators.js';
-import { analyzeSide } from './modules/normalizer.js';
+import { analyzeSideCycles, summarizeSide, scalarMeanSD } from './modules/normalizer.js';
 import { renderChart, chartToPngDataUrl } from './modules/chartRenderer.js';
 import { buildWorkbook, downloadWorkbook } from './modules/excelExporter.js';
 import { buildExportFilename } from './utils/filename.js';
 import { clamp, round } from './utils/numbers.js';
 
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.4.0';
 
 const el = {
   dropZone: document.getElementById('drop-zone'),
@@ -39,6 +42,7 @@ const el = {
   zipError: document.getElementById('zip-error'),
 
   sectionSelection: document.getElementById('section-selection'),
+  currentZip: document.getElementById('current-zip'),
   selectTrial: document.getElementById('select-trial'),
   selectionError: document.getElementById('selection-error'),
   comStatus: document.getElementById('com-status'),
@@ -69,6 +73,14 @@ const el = {
   cycleTableBody: document.querySelector('#cycle-table tbody'),
   cycleInfo: document.getElementById('cycle-info'),
 
+  sectionDatasets: document.getElementById('section-datasets'),
+  datasetTableBody: document.querySelector('#dataset-table tbody'),
+  btnAddZip: document.getElementById('btn-add-zip'),
+  inputAddZip: document.getElementById('input-add-zip'),
+  datasetTotal: document.getElementById('dataset-total'),
+  datasetStatus: document.getElementById('dataset-status'),
+  datasetError: document.getElementById('dataset-error'),
+
   sectionAnalyze: document.getElementById('section-analyze'),
   btnAnalyze: document.getElementById('btn-analyze'),
   analyzeError: document.getElementById('analyze-error'),
@@ -91,38 +103,33 @@ const el = {
 
 const videoGrid = new VideoGrid(el.videoGrid);
 
+// 読み込んだZIP（データセット）の一覧と、2〜5で編集中のZIP・試行。
+// 各試行は、展開済みのデータ（trial.data: MOT・身体重心・マーカー）と歩行イベント（trial.events）を保持する。
+// 解析は全データセットのうちイベントを設定した全試行が対象。
 const state = {
-  zipFile: null,
-  zipInstance: null,
-  trials: [],
+  datasets: [],
+  current: null,
   selectedTrial: null,
+  // 以下は編集中の試行の値（trial.data / trial.events を指す）
   motData: null,
   timeArray: null,
+  events: createEventList(),
   // 表示中のカメラ名。試行を切り替えても、同じカメラがあれば選択を引き継ぐ
   selectedCameras: new Set(['Cam0']),
-  // 選択中の試行で展開済みの動画Blob（path → Blob）。カメラの再選択時に再展開しない
+  // 編集中の試行で展開済みの動画Blob（path → Blob）。カメラの再選択時に再展開しない
   videoBlobCache: new Map(),
   currentSampleIndex: 0,
-  // 試行ごとの歩行イベント（motPath → イベント配列）。試行を切り替えても設定内容を保持する
-  eventsByTrial: new Map(),
-  events: createEventList(),
-  // ZIP内のOpenSimモデル（パス → 解析済みモデルのPromise）。同じモデルを試行ごとに再解析しない
-  modelCache: new Map(),
-  // 選択中の試行の身体重心時系列と、算出に用いたモデルの情報（算出できない場合は null）
-  com: null,
-  comModel: null,
-  // 歩幅・歩行速度に用いるマーカー軌跡（TRC、なければモデルの順運動学）と、その出所
-  markers: null,
-  markerSource: null,
   analysisResult: null,
   charts: null,
 };
+
+let nextDatasetId = 1;
 
 function showSection(sectionEl, visible) {
   sectionEl.hidden = !visible;
 }
 
-// イベントが変わったら、以前の解析結果は無効になるため非表示にする
+// 解析対象（イベント・ZIP）が変わったら、以前の解析結果は無効になるため非表示にする
 function invalidateAnalysis() {
   state.analysisResult = null;
   state.charts = null;
@@ -131,48 +138,92 @@ function invalidateAnalysis() {
   el.analyzeError.textContent = '';
 }
 
-// ---------- Section 1: ZIP upload ----------
+const fmt = (v, digits = 1) => (v === null || v === undefined ? '-' : round(v, digits).toFixed(digits));
 
-async function handleZipFile(file) {
+function sideCell(side) {
+  const td = document.createElement('td');
+  td.textContent = SIDE_LABELS[side];
+  td.className = `side-text-${side}`;
+  return td;
+}
+
+function textCell(text, className) {
+  const td = document.createElement('td');
+  td.textContent = text;
+  if (className) td.className = className;
+  return td;
+}
+
+function button(text, className, onClick) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = className;
+  btn.textContent = text;
+  btn.addEventListener('click', onClick);
+  return btn;
+}
+
+// ---------- Section 1 & 6: ZIP files (datasets) ----------
+
+const sameFile = (a, b) => a.name === b.name && a.size === b.size && a.lastModified === b.lastModified;
+
+async function handleZipFiles(files) {
   el.zipError.textContent = '';
-  el.zipStatus.textContent = 'ZIPを読み込み中...';
+  el.datasetError.textContent = '';
+  const errors = [];
+  let firstAdded = null;
 
-  try {
-    const zip = await loadZip(file);
-    const trials = buildTrialList(zip);
-
-    if (trials.length === 0) {
-      throw new Error('OpenSimData/Kinematics 内にMOTファイルが見つかりません。');
+  for (const file of files) {
+    const existing = state.datasets.find((d) => sameFile(d.file, file));
+    if (existing) {
+      errors.push(`${file.name} は既に読み込まれています。`);
+      firstAdded = firstAdded || existing;
+      continue;
     }
-
-    state.zipFile = file;
-    state.zipInstance = zip;
-    state.trials = trials;
-    state.eventsByTrial = new Map();
-    state.modelCache = new Map();
-
-    el.selectTrial.innerHTML = '';
-    trials.forEach((trial, idx) => {
-      const opt = document.createElement('option');
-      opt.value = String(idx);
-      opt.textContent = trial.motName;
-      el.selectTrial.appendChild(opt);
-    });
-
-    el.zipStatus.textContent = `${trials.length} 件のMOTファイルを検出しました。`;
-    showSection(el.sectionSelection, true);
-
-    await selectTrial(0);
-  } catch (err) {
-    el.zipStatus.textContent = '';
-    el.zipError.textContent = err.message || 'ZIPファイルを読み込めませんでした。';
+    el.zipStatus.textContent = `${file.name} を読み込み中...`;
+    try {
+      const zip = await loadZip(file);
+      const trials = buildTrialList(zip);
+      if (trials.length === 0) {
+        throw new Error('OpenSimData/Kinematics 内にMOTファイルが見つかりません。');
+      }
+      const dataset = { id: nextDatasetId++, file, zip, trials, modelCache: new Map(), selectedIndex: 0 };
+      state.datasets.push(dataset);
+      firstAdded = firstAdded || dataset;
+    } catch (err) {
+      errors.push(`${file.name}: ${err.message || 'ZIPファイルを読み込めませんでした。'}`);
+    }
   }
+
+  el.zipStatus.textContent =
+    state.datasets.length > 0 ? `${state.datasets.length} 件のZIPファイルを読み込み済みです。` : '';
+  el.zipError.textContent = errors.join(' ');
+  el.datasetError.textContent = errors.join(' ');
+
+  if (firstAdded) {
+    invalidateAnalysis();
+    await activateDataset(firstAdded);
+  }
+  renderDatasetTable();
+}
+
+function filesFrom(list) {
+  return Array.from(list || []).filter((f) => f.name.toLowerCase().endsWith('.zip') || f.type.includes('zip'));
 }
 
 el.btnSelectZip.addEventListener('click', () => el.inputZip.click());
 el.inputZip.addEventListener('change', (e) => {
-  const file = e.target.files && e.target.files[0];
-  if (file) handleZipFile(file);
+  const files = filesFrom(e.target.files);
+  e.target.value = '';
+  if (files.length) handleZipFiles(files);
+});
+el.btnAddZip.addEventListener('click', () => el.inputAddZip.click());
+el.inputAddZip.addEventListener('change', async (e) => {
+  const files = filesFrom(e.target.files);
+  e.target.value = '';
+  if (files.length === 0) return;
+  await handleZipFiles(files);
+  el.sectionSelection.scrollIntoView({ behavior: 'smooth', block: 'start' });
 });
 
 ['dragenter', 'dragover'].forEach((evt) => {
@@ -188,29 +239,223 @@ el.inputZip.addEventListener('change', (e) => {
   });
 });
 el.dropZone.addEventListener('drop', (e) => {
-  const file = e.dataTransfer.files && e.dataTransfer.files[0];
-  if (file) handleZipFile(file);
+  const files = filesFrom(e.dataTransfer.files);
+  if (files.length) handleZipFiles(files);
 });
+
+// 2〜5で編集するZIPを切り替える
+async function activateDataset(dataset) {
+  state.current = dataset;
+  el.currentZip.textContent = `編集中のZIP: ${dataset.file.name}`;
+  el.selectTrial.innerHTML = '';
+  dataset.trials.forEach((trial, idx) => {
+    const opt = document.createElement('option');
+    opt.value = String(idx);
+    opt.textContent = trial.events && trial.events.length > 0 ? `${trial.motName}（イベント ${trial.events.length}）` : trial.motName;
+    el.selectTrial.appendChild(opt);
+  });
+  el.selectTrial.value = String(dataset.selectedIndex);
+  showSection(el.sectionSelection, true);
+  showSection(el.sectionDatasets, true);
+  await selectTrial(dataset.selectedIndex);
+}
+
+function removeDataset(dataset) {
+  if (!window.confirm(`${dataset.file.name} とその試行に設定したイベントを解析対象から削除します。よろしいですか？`)) return;
+  state.datasets = state.datasets.filter((d) => d !== dataset);
+  invalidateAnalysis();
+  if (state.current === dataset) {
+    if (state.datasets.length > 0) {
+      activateDataset(state.datasets[0]);
+    } else {
+      resetEditor();
+    }
+  }
+  el.zipStatus.textContent =
+    state.datasets.length > 0 ? `${state.datasets.length} 件のZIPファイルを読み込み済みです。` : '';
+  renderDatasetTable();
+}
+
+// ZIPが1つもなくなったときに、2〜7を初期状態へ戻す
+function resetEditor() {
+  state.current = null;
+  state.selectedTrial = null;
+  state.motData = null;
+  state.timeArray = null;
+  state.events = createEventList();
+  videoGrid.clear();
+  [el.sectionSelection, el.sectionVideo, el.sectionControls, el.sectionIC, el.sectionDatasets, el.sectionAnalyze].forEach(
+    (s) => showSection(s, false)
+  );
+}
+
+function cyclesOf(trial) {
+  const events = trial.events || [];
+  return { R: buildCycles(events, 'R'), L: buildCycles(events, 'L') };
+}
+
+function renderDatasetTable() {
+  el.datasetTableBody.innerHTML = '';
+  let totalTrials = 0;
+  const totals = { R: 0, L: 0 };
+
+  state.datasets.forEach((dataset, i) => {
+    const tr = document.createElement('tr');
+    if (dataset === state.current) tr.className = 'current';
+
+    const trialTexts = [];
+    const counts = { R: 0, L: 0 };
+    for (const trial of dataset.trials) {
+      if (!trial.events || trial.events.length === 0) continue;
+      const bySide = cyclesOf(trial);
+      counts.R += bySide.R.length;
+      counts.L += bySide.L.length;
+      if (bySide.R.length + bySide.L.length > 0) totalTrials += 1;
+      trialTexts.push(`${trial.motName}（R ${bySide.R.length} / L ${bySide.L.length}）`);
+    }
+    totals.R += counts.R;
+    totals.L += counts.L;
+
+    const actions = document.createElement('td');
+    actions.append(
+      button(dataset === state.current ? '編集中' : '編集', 'secondary', async () => {
+        await activateDataset(dataset);
+        renderDatasetTable();
+        el.sectionSelection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }),
+      ' ',
+      button('削除', 'danger', () => removeDataset(dataset))
+    );
+    actions.firstChild.disabled = dataset === state.current;
+
+    tr.append(
+      textCell(String(i + 1)),
+      textCell(dataset.file.name, 'wrap filename'),
+      textCell(trialTexts.length > 0 ? trialTexts.join('、') : '（未設定）', 'wrap'),
+      textCell(String(counts.R), 'side-text-R'),
+      textCell(String(counts.L), 'side-text-L'),
+      actions
+    );
+    el.datasetTableBody.appendChild(tr);
+  });
+
+  el.datasetTotal.textContent =
+    state.datasets.length > 0
+      ? `解析対象: ${totalTrials} 試行（Right ${totals.R} 周期 / Left ${totals.L} 周期）`
+      : '';
+}
 
 // ---------- Section 2: Trial selection ----------
 
+function getModel(dataset, path) {
+  if (!dataset.modelCache.has(path)) {
+    dataset.modelCache.set(path, loadOsimModel(dataset.zip, path));
+  }
+  return dataset.modelCache.get(path);
+}
+
+// 試行のMOTとスケーリング済みOpenSimモデルから身体重心の時系列を求める。
+// 算出できなくても関節角度の解析は続けられるため、エラーは状態表示にとどめる。
+async function loadCenterOfMass(dataset, trial, motData) {
+  if (!trial.modelPath) {
+    return {
+      com: null,
+      comModel: null,
+      status: '身体重心: OpenSimData/Model 内にモデル(.osim)が見つからないため算出しません（関節角度の解析は可能です）。',
+    };
+  }
+  try {
+    const model = await getModel(dataset, trial.modelPath);
+    const com = computeCenterOfMassTrajectory(model, motData);
+    const fileName = trial.modelPath.split('/').pop();
+    let status = `身体重心: ${fileName}（総質量 ${round(model.totalMass, 1)} kg）から算出しました。`;
+    if (com.missingCoordinates.length > 0) {
+      status += ` MOTにない座標はモデルの既定値を使用: ${com.missingCoordinates.join(', ')}`;
+    }
+    return { com, comModel: { path: trial.modelPath, name: model.name, totalMass: model.totalMass }, status };
+  } catch (err) {
+    return { com: null, comModel: null, status: `身体重心を算出できませんでした: ${err.message || err}` };
+  }
+}
+
+// 歩幅（踵マーカー）と、身体重心がない場合の歩行速度（骨盤マーカー）に使うマーカー軌跡を用意する。
+// OpenCapと同じく実測のTRCを優先し、なければモデルの順運動学でマーカー位置を求める。
+async function loadMarkers(dataset, trial, motData) {
+  const names = [...Object.values(HEEL_MARKERS), ...PELVIS_MARKERS];
+  let markers = null;
+  let markerSource = null;
+  try {
+    if (trial.trcPath) {
+      markers = await loadTrc(dataset.zip, trial.trcPath);
+      markerSource = trial.trcPath;
+    } else if (trial.modelPath) {
+      const model = await getModel(dataset, trial.modelPath);
+      markers = computeMarkerTrajectories(model, motData, names);
+      markerSource = `${trial.modelPath} (forward kinematics)`;
+    }
+  } catch (err) {
+    return { markers: null, markerSource: null, status: `マーカーデータを読み込めませんでした: ${err.message || err}` };
+  }
+  if (!markers) {
+    return { markers, markerSource, status: '歩幅: マーカーデータ(.trc)・モデルが見つからないため算出しません。' };
+  }
+  const missing = Object.values(HEEL_MARKERS).filter(
+    (n) => !Object.keys(markers.markers).some((k) => k.toLowerCase() === n.toLowerCase())
+  );
+  const source = trial.trcPath ? trial.trcPath.split('/').pop() : 'モデルの順運動学';
+  const status =
+    missing.length > 0
+      ? `歩幅: 踵マーカー（${missing.join(', ')}）が見つからないため算出しません。`
+      : `歩幅: ${source} の踵マーカー（${Object.values(HEEL_MARKERS).join(', ')}）から算出します。`;
+  return { markers, markerSource, status };
+}
+
+// 試行の解析用データ（MOT・身体重心・マーカー）を一度だけ展開して試行に保持する
+async function ensureTrialData(dataset, trial) {
+  if (trial.data) return trial.data;
+  const { motData } = await loadTrialData(dataset.zip, trial);
+  const timeArray = getColumn(motData, 'time');
+  if (!timeArray) {
+    throw new Error('MOTファイルに time 列が見つかりません。');
+  }
+  const comInfo = await loadCenterOfMass(dataset, trial, motData);
+  const markerInfo = await loadMarkers(dataset, trial, motData);
+  trial.data = {
+    motData,
+    timeArray,
+    com: comInfo.com,
+    comModel: comInfo.comModel,
+    comStatus: comInfo.status,
+    markers: markerInfo.markers,
+    markerSource: markerInfo.markerSource,
+    markerStatus: markerInfo.status,
+  };
+  return trial.data;
+}
+
 async function selectTrial(index) {
-  const trial = state.trials[index];
+  const dataset = state.current;
+  const trial = dataset.trials[index];
+  dataset.selectedIndex = index;
   state.selectedTrial = trial;
   el.selectionError.textContent = '';
 
+  // 読み込み中は前の試行のイベントを表示・編集できないようにする（誤って前の試行へ記録するのを防ぐ）
+  state.timeArray = null;
+  state.events = createEventList();
+  renderEventTable();
+  renderEventTrack();
+  el.eventButtons.forEach((b) => {
+    b.disabled = true;
+  });
+
   try {
-    const { motData } = await loadTrialData(state.zipInstance, trial);
-    state.motData = motData;
-    state.timeArray = getColumn(motData, 'time');
+    const data = await ensureTrialData(dataset, trial);
+    state.motData = data.motData;
+    state.timeArray = data.timeArray;
     state.currentSampleIndex = 0;
-
-    if (!state.timeArray) {
-      throw new Error('MOTファイルに time 列が見つかりません。');
-    }
-
-    await updateCenterOfMass(trial);
-    await updateMarkers(trial);
+    el.comStatus.textContent = data.comStatus;
+    el.markerStatus.textContent = data.markerStatus;
 
     state.videoBlobCache = new Map();
     renderCameraSelect(trial);
@@ -220,12 +465,12 @@ async function selectTrial(index) {
     el.timeSlider.max = String(state.timeArray.length - 1);
     el.timeSlider.value = '0';
 
-    if (!state.eventsByTrial.has(trial.motPath)) {
-      state.eventsByTrial.set(trial.motPath, createEventList());
-    }
-    state.events = state.eventsByTrial.get(trial.motPath);
+    if (!trial.events) trial.events = createEventList();
+    state.events = trial.events;
+    el.eventButtons.forEach((b) => {
+      b.disabled = false;
+    });
     el.icError.textContent = '';
-    invalidateAnalysis();
     checkColumns();
     refreshEvents();
 
@@ -251,74 +496,6 @@ function checkColumns() {
     .filter((r) => !r.ok)
     .map((r) => `${SIDE_LABELS[r.side]} の解析に必要な列が見つかりません。Missing: ${r.missing.join(', ')}`);
   el.selectionError.textContent = messages.join(' ');
-}
-
-// ---------- Center of mass (OpenSim model) ----------
-
-function getModel(path) {
-  if (!state.modelCache.has(path)) {
-    state.modelCache.set(path, loadOsimModel(state.zipInstance, path));
-  }
-  return state.modelCache.get(path);
-}
-
-// 試行のMOTとスケーリング済みOpenSimモデルから身体重心の時系列を求める。
-// 算出できなくても関節角度の解析は続けられるため、エラーは状態表示にとどめる。
-async function updateCenterOfMass(trial) {
-  state.com = null;
-  state.comModel = null;
-  if (!trial.modelPath) {
-    el.comStatus.textContent =
-      '身体重心: OpenSimData/Model 内にモデル(.osim)が見つからないため算出しません（関節角度の解析は可能です）。';
-    return;
-  }
-  try {
-    const model = await getModel(trial.modelPath);
-    const com = computeCenterOfMassTrajectory(model, state.motData);
-    state.com = com;
-    state.comModel = { path: trial.modelPath, name: model.name, totalMass: model.totalMass };
-    const fileName = trial.modelPath.split('/').pop();
-    let text = `身体重心: ${fileName}（総質量 ${round(model.totalMass, 1)} kg）から算出しました。`;
-    if (com.missingCoordinates.length > 0) {
-      text += ` MOTにない座標はモデルの既定値を使用: ${com.missingCoordinates.join(', ')}`;
-    }
-    el.comStatus.textContent = text;
-  } catch (err) {
-    el.comStatus.textContent = `身体重心を算出できませんでした: ${err.message || err}`;
-  }
-}
-
-// 歩幅（踵マーカー）と、身体重心がない場合の歩行速度（骨盤マーカー）に使うマーカー軌跡を用意する。
-// OpenCapと同じく実測のTRCを優先し、なければモデルの順運動学でマーカー位置を求める。
-async function updateMarkers(trial) {
-  state.markers = null;
-  state.markerSource = null;
-  const names = [...Object.values(HEEL_MARKERS), ...PELVIS_MARKERS];
-  try {
-    if (trial.trcPath) {
-      state.markers = await loadTrc(state.zipInstance, trial.trcPath);
-      state.markerSource = trial.trcPath;
-    } else if (trial.modelPath) {
-      const model = await getModel(trial.modelPath);
-      state.markers = computeMarkerTrajectories(model, state.motData, names);
-      state.markerSource = `${trial.modelPath} (forward kinematics)`;
-    }
-  } catch (err) {
-    el.markerStatus.textContent = `マーカーデータを読み込めませんでした: ${err.message || err}`;
-    return;
-  }
-  if (!state.markers) {
-    el.markerStatus.textContent = '歩幅: マーカーデータ(.trc)・モデルが見つからないため算出しません。';
-    return;
-  }
-  const missing = Object.values(HEEL_MARKERS).filter(
-    (n) => !Object.keys(state.markers.markers).some((k) => k.toLowerCase() === n.toLowerCase())
-  );
-  const source = trial.trcPath ? trial.trcPath.split('/').pop() : 'モデルの順運動学';
-  el.markerStatus.textContent =
-    missing.length > 0
-      ? `歩幅: 踵マーカー（${missing.join(', ')}）が見つからないため算出しません。`
-      : `歩幅: ${source} の踵マーカー（${Object.values(HEEL_MARKERS).join(', ')}）から算出します。`;
 }
 
 // ---------- Section 3: Video / camera selection ----------
@@ -363,7 +540,7 @@ async function onCameraToggle(e) {
 
 async function getVideoBlob(video) {
   if (!state.videoBlobCache.has(video.path)) {
-    state.videoBlobCache.set(video.path, await loadVideoBlob(state.zipInstance, video));
+    state.videoBlobCache.set(video.path, await loadVideoBlob(state.current.zip, video));
   }
   return state.videoBlobCache.get(video.path);
 }
@@ -449,21 +626,6 @@ function cyclesBySide() {
   return { R: buildCycles(state.events, 'R'), L: buildCycles(state.events, 'L') };
 }
 
-const fmt = (v, digits = 1) => (v === null || v === undefined ? '-' : round(v, digits).toFixed(digits));
-
-function sideCell(side) {
-  const td = document.createElement('td');
-  td.textContent = SIDE_LABELS[side];
-  td.className = `side-text-${side}`;
-  return td;
-}
-
-function textCell(text) {
-  const td = document.createElement('td');
-  td.textContent = text;
-  return td;
-}
-
 function renderEventTable() {
   el.eventTableBody.innerHTML = '';
   state.events.forEach((event, i) => {
@@ -471,21 +633,12 @@ function renderEventTable() {
     tr.dataset.sample = String(event.sampleIndex);
 
     const actions = document.createElement('td');
-    const btnGo = document.createElement('button');
-    btnGo.type = 'button';
-    btnGo.className = 'secondary';
-    btnGo.textContent = '移動';
-    btnGo.addEventListener('click', () => goToSample(event.sampleIndex));
-    const btnDel = document.createElement('button');
-    btnDel.type = 'button';
-    btnDel.className = 'danger';
-    btnDel.textContent = '削除';
-    btnDel.setAttribute('aria-label', `${SIDE_LABELS[event.side]} ${EVENT_LABELS[event.type]} sample ${event.sampleIndex + 1} を削除`);
-    btnDel.addEventListener('click', () => {
+    const btnDel = button('削除', 'danger', () => {
       removeEvent(state.events, event.id);
       onEventsChanged();
     });
-    actions.append(btnGo, ' ', btnDel);
+    btnDel.setAttribute('aria-label', `${SIDE_LABELS[event.side]} ${EVENT_LABELS[event.type]} sample ${event.sampleIndex + 1} を削除`);
+    actions.append(button('移動', 'secondary', () => goToSample(event.sampleIndex)), ' ', btnDel);
 
     tr.append(
       textCell(String(i + 1)),
@@ -563,10 +716,21 @@ function highlightCurrentEvents() {
   });
 }
 
+// 試行選択のプルダウンに、イベント設定済みの件数を表示する
+function updateTrialOptionLabel() {
+  const dataset = state.current;
+  if (!dataset) return;
+  const opt = el.selectTrial.options[dataset.selectedIndex];
+  const trial = dataset.trials[dataset.selectedIndex];
+  if (opt) opt.textContent = trial.events.length > 0 ? `${trial.motName}（イベント ${trial.events.length}）` : trial.motName;
+}
+
 function refreshEvents() {
   renderEventTable();
   renderCycleTable();
   renderEventTrack();
+  renderDatasetTable();
+  updateTrialOptionLabel();
   updateAnalyzeButtonState();
 }
 
@@ -594,11 +758,39 @@ el.btnClearEvents.addEventListener('click', () => {
   onEventsChanged();
 });
 
-// ---------- Section 6: Analyze ----------
+// ---------- Section 7: Analyze ----------
+
+// 解析対象: 全ZIPのうち、歩行周期が1つ以上ある試行
+function collectSources() {
+  const sources = [];
+  for (const dataset of state.datasets) {
+    for (const trial of dataset.trials) {
+      if (!trial.data || !trial.events || trial.events.length === 0) continue;
+      const bySide = cyclesOf(trial);
+      if (bySide.R.length + bySide.L.length === 0) continue;
+      sources.push({ dataset, trial, data: trial.data, bySide, label: `${dataset.file.name} / ${trial.motName}` });
+    }
+  }
+  return sources;
+}
+
+// 試行ごとに解析可能な側を判定する（必要列が欠けた側はその試行のみ除外）
+function checkSources(sources) {
+  const errors = [];
+  for (const src of sources) {
+    const result = checkAnalysisReady({ motData: src.data.motData, cyclesBySide: src.bySide });
+    src.sides = result.sides;
+    result.errors.forEach((e) => errors.push(`[${src.label}] ${e}`));
+  }
+  const ok = sources.some((s) => s.sides.length > 0);
+  if (!ok && errors.length === 0) {
+    errors.push('解析には同じ側のICを2回以上設定してください（連続する同側IC間を1歩行周期とします）。');
+  }
+  return { ok, errors };
+}
 
 function updateAnalyzeButtonState() {
-  const { ok } = checkAnalysisReady({ motData: state.motData, cyclesBySide: cyclesBySide() });
-  el.btnAnalyze.disabled = !ok;
+  el.btnAnalyze.disabled = !checkSources(collectSources()).ok;
 }
 
 function summaryText(result) {
@@ -626,12 +818,24 @@ function comSummaryText(side, com) {
   return parts.join('、');
 }
 
-// 時間・距離因子の表（行: 項目、列: 側）
-function renderSpatioTemporalTable(sides, stResults) {
+// 時間・距離因子の表（行: 項目、列: 側）。歩行速度は左右を分けず全体の値を表示する
+function renderSpatioTemporalTable(sides, stResults, overallSpeed) {
   el.stTableBody.innerHTML = '';
+
+  const speedRow = document.createElement('tr');
+  speedRow.appendChild(textCell(`${WALKING_SPEED.label}（全体）`));
+  const speedCell = textCell(
+    overallSpeed.n > 0
+      ? `${withSD(overallSpeed, WALKING_SPEED.digits, WALKING_SPEED.unit)}（n=${overallSpeed.n} 試行）`
+      : '-'
+  );
+  speedCell.colSpan = 2;
+  speedRow.appendChild(speedCell);
+  el.stTableBody.appendChild(speedRow);
+
   for (const param of SPATIOTEMPORAL_PARAMS) {
     const tr = document.createElement('tr');
-    tr.appendChild(textCell(`${param.label}`));
+    tr.appendChild(textCell(param.label));
     for (const side of SIDES) {
       if (!sides.includes(side)) {
         tr.appendChild(textCell('-'));
@@ -642,8 +846,7 @@ function renderSpatioTemporalTable(sides, stResults) {
       if (stat.n > 0) {
         text += `（n=${stat.n}）`;
         if (param.percentKey) {
-          const pctStat = stResults[side].summary[param.percentKey];
-          text += ` / ${fmt(pctStat.mean)}%`;
+          text += ` / ${fmt(stResults[side].summary[param.percentKey].mean)}%`;
         }
       }
       tr.appendChild(textCell(text));
@@ -652,42 +855,73 @@ function renderSpatioTemporalTable(sides, stResults) {
   }
 }
 
-el.btnAnalyze.addEventListener('click', () => {
-  const bySide = cyclesBySide();
-  const { ok, errors, sides } = checkAnalysisReady({ motData: state.motData, cyclesBySide: bySide });
+// 全試行の周期をまとめて解析する。各結果の cycles 配列は同じ順序（側ごとの通し番号）で並ぶ
+function analyzeSources(sources) {
+  const sides = SIDES.filter((side) => sources.some((s) => s.sides.includes(side)));
+  const comAvailable = sources.every((s) => s.data.com);
+  const sideResults = {};
+  const stResults = {};
+  const comResults = comAvailable ? {} : null;
 
+  for (const side of sides) {
+    const jointCycles = [];
+    const stCycles = [];
+    const comCycles = [];
+    for (const src of sources) {
+      if (!src.sides.includes(side)) continue;
+      const cycles = src.bySide[side];
+      const analyzed = analyzeSideCycles(src.data.motData, side, cycles);
+      const st = cycles.map((c) => computeCycleParameters(c, { com: src.data.com, markers: src.data.markers }));
+      const com = comAvailable ? analyzeComCycles(src.data.com, cycles) : null;
+      analyzed.forEach((c, k) => {
+        jointCycles.push({ ...c, zipName: src.dataset.file.name, trialName: src.trial.motName, cycleInTrial: c.number });
+        stCycles.push(st[k]);
+        if (com) comCycles.push(com[k]);
+      });
+    }
+    jointCycles.forEach((c, i) => {
+      c.number = i + 1;
+    });
+    sideResults[side] = summarizeSide(side, jointCycles);
+    stResults[side] = summarizeSpatioTemporal(stCycles);
+    if (comResults) comResults[side] = summarizeCom(comCycles);
+  }
+
+  const trials = sources.map((src) => {
+    const speed = computeTrialSpeed(src.trial.events, { com: src.data.com, markers: src.data.markers });
+    return {
+      zipName: src.dataset.file.name,
+      trialName: src.trial.motName,
+      cycles: { R: src.sides.includes('R') ? src.bySide.R.length : 0, L: src.sides.includes('L') ? src.bySide.L.length : 0 },
+      speed,
+      speedReference: src.data.com ? 'Body COM' : 'Pelvis marker center',
+      comModel: src.data.comModel,
+      markerSource: src.data.markerSource,
+    };
+  });
+  const overallSpeed = scalarMeanSD(trials.map((t) => (t.speed ? t.speed.speed : null)));
+
+  const events = sources.flatMap((src) =>
+    src.trial.events.map((e) => ({ ...e, zipName: src.dataset.file.name, trialName: src.trial.motName }))
+  );
+
+  return { sides, sideResults, stResults, comResults, comAvailable, trials, overallSpeed, events };
+}
+
+el.btnAnalyze.addEventListener('click', () => {
+  const sources = collectSources();
+  const { ok, errors } = checkSources(sources);
   if (!ok) {
     el.analyzeError.textContent = errors.join(' ');
     return;
   }
-  // 一方の側だけ必要列が欠けている場合は、解析可能な側の結果を出しつつ警告を表示する
+  // 一部の試行・側だけ必要列が欠けている場合は、解析可能なものの結果を出しつつ警告を表示する
   el.analyzeError.textContent = errors.join(' ');
 
-  const sideResults = {};
-  sides.forEach((side) => {
-    sideResults[side] = analyzeSide(state.motData, side, bySide[side]);
-  });
-  const stResults = {};
-  sides.forEach((side) => {
-    stResults[side] = analyzeSpatioTemporal(bySide[side], { com: state.com, markers: state.markers });
-  });
-
-  let comResults = null;
-  if (state.com) {
-    comResults = {};
-    sides.forEach((side) => {
-      comResults[side] = analyzeComForSide(state.com, bySide[side]);
-    });
-  }
-  state.analysisResult = {
-    sideResults,
-    stResults,
-    comResults,
-    comModel: state.comModel,
-    markerSource: state.markerSource,
-    sides,
-    events: state.events.map((e) => ({ ...e })),
-  };
+  const usable = sources.filter((s) => s.sides.length > 0);
+  const result = analyzeSources(usable);
+  const { sides, sideResults, stResults, comResults } = result;
+  state.analysisResult = { ...result, sources: usable };
 
   const chartSides = (pick) =>
     sides.map((side) => {
@@ -713,12 +947,14 @@ el.btnAnalyze.addEventListener('click', () => {
     }));
 
   showSection(el.sectionResult, true);
-  showSection(el.comResult, Boolean(comResults));
+  showSection(el.comResult, true);
   state.charts = {
     hip: renderChart(el.chartHip, 'Hip Flexion Angle', jointSides('hip')),
     knee: renderChart(el.chartKnee, 'Knee Flexion Angle', jointSides('knee')),
     ankle: renderChart(el.chartAnkle, 'Ankle Angle', jointSides('ankle')),
   };
+  el.chartComVertical.hidden = !comResults;
+  el.chartComMl.hidden = !comResults;
   if (comResults) {
     state.charts.comVertical = renderChart(
       el.chartComVertical,
@@ -736,6 +972,10 @@ el.btnAnalyze.addEventListener('click', () => {
 
   el.resultSummary.innerHTML = '';
   el.comSummary.innerHTML = '';
+  const zipCount = new Set(usable.map((s) => s.dataset)).size;
+  const scope = document.createElement('p');
+  scope.textContent = `解析対象: ZIP ${zipCount} 件・${usable.length} 試行`;
+  el.resultSummary.appendChild(scope);
   sides.forEach((side) => {
     const p = document.createElement('p');
     p.className = `side-text-${side}`;
@@ -748,14 +988,27 @@ el.btnAnalyze.addEventListener('click', () => {
       el.comSummary.appendChild(pc);
     }
   });
+  if (!comResults) {
+    const missing = usable.filter((s) => !s.data.com).map((s) => s.label);
+    const p = document.createElement('p');
+    p.className = 'status-text';
+    p.textContent = `身体重心を算出できない試行があるため、身体重心の解析は行いません: ${missing.join('、')}`;
+    el.comSummary.appendChild(p);
+  }
 
-  renderSpatioTemporalTable(sides, stResults);
+  renderSpatioTemporalTable(sides, stResults, result.overallSpeed);
 
   showSection(el.sectionDownload, true);
   el.downloadStatus.textContent = '';
 });
 
-// ---------- Section 8: Excel download ----------
+// ---------- Section 9: Excel download ----------
+
+function timestamp() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}`;
+}
 
 el.btnDownloadExcel.addEventListener('click', async () => {
   if (!state.analysisResult) return;
@@ -763,7 +1016,7 @@ el.btnDownloadExcel.addEventListener('click', async () => {
   el.downloadStatus.textContent = 'Excelを生成中...';
 
   try {
-    const { sideResults, stResults, comResults, comModel, markerSource, sides, events } = state.analysisResult;
+    const { sideResults, stResults, comResults, sides, events, trials, overallSpeed, sources } = state.analysisResult;
 
     const chartImages = {};
     for (const [key, chart] of Object.entries(state.charts)) {
@@ -771,37 +1024,44 @@ el.btnDownloadExcel.addEventListener('click', async () => {
     }
 
     const metadata = {
-      'ZIP file name': state.zipFile.name,
-      'MOT file name': state.selectedTrial.motName,
-      'Video file path':
-        state.selectedTrial.videos.length === 0
-          ? '(not found)'
-          : videoGrid.panels.map((p) => p.path).join('; ') || '(not displayed)',
+      'Number of ZIP files': new Set(sources.map((s) => s.dataset)).size,
+      'Number of trials': sources.length,
+      ...Object.fromEntries(sources.map((s, i) => [`Source ${i + 1}`, s.label])),
       'Analyzed sides': sides.map((s) => SIDE_LABELS[s]).join(', '),
-      'Gait cycle definition': 'Consecutive ipsilateral IC to IC',
+      'Gait cycle definition': 'Consecutive ipsilateral IC to IC (cycles pooled across all trials and ZIP files)',
       'Number of events': events.length,
       'Normalization points': 101,
       'Interpolation method': 'linear',
-      'SD definition': 'Sample SD (n-1), across cycles',
-      'Step length marker source': markerSource || '(not available)',
-      'Walking speed reference': comModel ? 'Body COM' : 'Pelvis marker center (ASIS/PSIS)',
+      'SD definition': 'Sample SD (n-1), across pooled cycles (walking speed: across trials)',
+      'Walking speed definition':
+        'Per trial: horizontal displacement of the reference point (Body COM, or pelvis marker center if COM is unavailable) from the first to the last IC (either side) / time; overall = mean across trials',
       'Spatiotemporal definitions':
         'Step length = progression distance from contralateral heel (*_calc_study) at contralateral IC to ipsilateral heel at next ipsilateral IC; Stance = IC to TO; Swing = TO to next IC; Loading response = IC to contralateral TO; Pre-swing = contralateral IC to TO',
-      'COM model file': comModel ? comModel.path : '(not computed)',
-      'COM model total mass (kg)': comModel ? comModel.totalMass : null,
-      'COM method': comModel
+      'COM method': comResults
         ? 'Mass-weighted mean of all body COMs via forward kinematics of the scaled OpenSim model (MOT coordinates as exported by OpenCap, no additional filtering); velocity by central difference'
-        : '(not computed)',
-      'COM axes': comModel
+        : '(not computed: COM unavailable for some trials)',
+      'COM axes': comResults
         ? 'Vertical = ground Y (floor ~ 0); AP = horizontal COM displacement direction from IC to next IC per cycle; ML = AP x vertical (+right). Position columns are measured from the ground origin; displacement columns from the cycle mean (vertical/ML) or cycle start (AP)'
         : '(not computed)',
       'Application version': APP_VERSION,
       'Export date/time': new Date().toISOString(),
     };
 
-    const workbook = buildWorkbook({ chartImages, events, sideResults, stResults, comResults, metadata });
+    const workbook = buildWorkbook({
+      chartImages,
+      events,
+      sideResults,
+      stResults,
+      comResults,
+      trials,
+      overallSpeed,
+      metadata,
+    });
 
-    const filename = buildExportFilename(state.zipFile.name, state.selectedTrial.motName);
+    const filename =
+      sources.length === 1
+        ? buildExportFilename(sources[0].dataset.file.name, sources[0].trial.motName)
+        : `OpenCapGait_${sources.length}trials_${timestamp()}.xlsx`;
     await downloadWorkbook(workbook, filename);
 
     el.downloadStatus.textContent = `ダウンロードしました: ${filename}`;

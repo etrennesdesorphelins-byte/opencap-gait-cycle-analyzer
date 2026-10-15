@@ -1,15 +1,18 @@
 // 歩行周期ごとの時間・距離因子（歩行速度、歩幅、立脚・遊脚時間、荷重応答期・前遊脚期時間）。
 // 定義は OpenCap の gait_analysis.py に合わせる:
 // - 歩幅: 同側IC時の同側踵マーカー（*_calc_study）と、その直前の対側IC時の対側踵マーカーの進行方向距離
-// - 歩行速度: 周期開始IC→次ICの基準点（身体重心。なければ骨盤マーカー中心）の水平変位 ÷ 周期時間
+// - 歩行速度（左右を分けない全体の値）: 試行内の最初のIC→最後のIC（左右問わず）の基準点
+//   （身体重心。なければ骨盤マーカー中心）の水平変位 ÷ 時間。複数試行では試行間の平均±SD
 // - 立脚時間: IC→同側TO、遊脚時間: 同側TO→次の同側IC
 // - 荷重応答期: IC→対側TO（第1両脚支持期）、前遊脚期: 対側IC→同側TO（第2両脚支持期）
 
 import { scalarMeanSD } from './normalizer.js';
 import { progressionFrame, alongForward } from '../utils/progression.js';
 
+export const WALKING_SPEED = { key: 'speed', label: '歩行速度', en: 'Walking speed', unit: 'm/s', digits: 2 };
+
+// 左右別に算出する項目
 export const SPATIOTEMPORAL_PARAMS = [
-  { key: 'speed', label: '歩行速度', en: 'Walking speed', unit: 'm/s', digits: 2 },
   { key: 'stepLength', label: '歩幅', en: 'Step length', unit: 'm', digits: 3 },
   { key: 'stanceTime', label: '立脚時間', en: 'Stance time', unit: 's', digits: 3, percentKey: 'stancePercent' },
   { key: 'swingTime', label: '遊脚時間', en: 'Swing time', unit: 's', digits: 3, percentKey: 'swingPercent' },
@@ -77,13 +80,11 @@ export function computeCycleParameters(cycle, sources) {
   const preSwing =
     cycle.oppositeIC && tTO !== null && cycle.oppositeIC.motTime < tTO ? tTO - cycle.oppositeIC.motTime : null;
 
-  let speed = null;
   let stepLength = null;
   const p0 = referenceAt(sources, cycle.start);
   const p1 = referenceAt(sources, cycle.end);
   const frame = p0 && p1 ? progressionFrame(p0, p1) : null;
   if (frame && frame.defined) {
-    speed = frame.distance / duration;
     if (cycle.oppositeIC) {
       const heel = heelAt(sources, cycle.side, cycle.end);
       const oppHeel = heelAt(sources, opposite, cycle.oppositeIC);
@@ -92,7 +93,6 @@ export function computeCycleParameters(cycle, sources) {
   }
 
   return {
-    speed,
     stepLength,
     stanceTime,
     swingTime,
@@ -105,8 +105,23 @@ export function computeCycleParameters(cycle, sources) {
   };
 }
 
-export function analyzeSpatioTemporal(cycles, sources) {
-  const perCycle = cycles.map((c) => computeCycleParameters(c, sources));
+// 1試行の全イベントのうち最初のIC→最後のIC（左右問わず）の基準点の水平変位 ÷ 時間を、その試行の歩行速度とする
+export function computeTrialSpeed(events, sources) {
+  const ics = events.filter((e) => e.type === 'IC').sort((a, b) => a.motTime - b.motTime);
+  if (ics.length < 2) return null;
+  const first = ics[0];
+  const last = ics[ics.length - 1];
+  const p0 = referenceAt(sources, first);
+  const p1 = referenceAt(sources, last);
+  if (!p0 || !p1) return null;
+  const frame = progressionFrame(p0, p1);
+  const duration = last.motTime - first.motTime;
+  if (!frame.defined || duration <= 0) return null;
+  return { speed: frame.distance / duration, distance: frame.distance, duration, startTime: first.motTime, endTime: last.motTime };
+}
+
+// 時間・距離因子を算出済みの周期（複数試行から集めたものでもよい）の平均±SDをまとめる
+export function summarizeSpatioTemporal(perCycle) {
   const summary = {};
   for (const p of SPATIOTEMPORAL_PARAMS) {
     summary[p.key] = scalarMeanSD(perCycle.map((c) => c[p.key]));
