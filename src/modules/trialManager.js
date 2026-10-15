@@ -1,5 +1,13 @@
-import { findMotFiles, findVideosForMot, extractMotText, extractVideoBlob } from './zipLoader.js';
+import {
+  findMotFiles,
+  findVideosForMot,
+  findModelForMot,
+  extractMotText,
+  extractVideoBlob,
+  extractText,
+} from './zipLoader.js';
 import { parseMot } from './motParser.js';
+import { parseOsimModel } from './osimModel.js';
 
 export function buildTrialList(zip) {
   const motFiles = findMotFiles(zip);
@@ -7,6 +15,7 @@ export function buildTrialList(zip) {
     motPath: mot.path,
     motName: mot.name,
     videos: findVideosForMot(zip, mot.path),
+    modelPath: findModelForMot(zip, mot.path),
   }));
 }
 
@@ -20,4 +29,8 @@ export async function loadTrialData(zip, trial) {
 
 export function loadVideoBlob(zip, video) {
   return extractVideoBlob(zip, video.path);
+}
+
+export async function loadOsimModel(zip, modelPath) {
+  return parseOsimModel(await extractText(zip, modelPath));
 }

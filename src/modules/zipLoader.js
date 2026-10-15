@@ -106,6 +106,33 @@ export function findVideosForMot(zip, motPath) {
   return videos;
 }
 
+// MOTに対応するスケーリング済みOpenSimモデル(.osim)を探す。
+// 通常: {root}OpenSimData/Model/*.osim
+// 単眼(mono)セッション: {root}OpenSimData/Model/{trial}/*.osim
+export function findModelForMot(zip, motPath) {
+  const base = baseNameWithoutExt(motPath).toLowerCase();
+  const modelDir = `${extractRootPrefix(motPath).toLowerCase()}opensimdata/model/`;
+  const index = buildEntryIndex(zip);
+  let shared = null;
+  for (const [normPath, entry] of index) {
+    if (!normPath.startsWith(modelDir) || !normPath.endsWith('.osim')) continue;
+    const rest = normPath.slice(modelDir.length);
+    if (rest.startsWith(`${base}/`) && !rest.slice(base.length + 1).includes('/')) {
+      return entry.name;
+    }
+    if (!rest.includes('/') && !shared) shared = entry.name;
+  }
+  return shared;
+}
+
+export async function extractText(zip, path) {
+  const entry = zip.file(path);
+  if (!entry) {
+    throw new Error(`ファイルが見つかりません: ${path}`);
+  }
+  return entry.async('text');
+}
+
 export async function extractMotText(zip, motPath) {
   const entry = zip.file(motPath);
   if (!entry) {

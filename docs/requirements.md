@@ -2,7 +2,7 @@
 
 ## 1. 文書目的
 
-本書は、OpenCapからダウンロードしたZIPファイルをブラウザ上で読み込み、対象試行・解析側・1歩行周期を選択し、下肢関節角度を101点に時間正規化してExcel出力するWebアプリケーションの要件を定義する。
+本書は、OpenCapからダウンロードしたZIPファイルをブラウザ上で読み込み、対象試行を選択して左右のIC・Toe Offを設定し、左右の全歩行周期の下肢関節角度を101点に時間正規化（平均±SD）してExcel出力するWebアプリケーションの要件を定義する。
 
 本アプリケーションは、GitHub上でソースコードを公開し、GitHub Pages等を用いて、利用者が専用ソフトウェアをインストールせずWebブラウザのみで使用できることを目標とする。
 
@@ -168,16 +168,15 @@ Videos/Cam1/InputMedia/gsdgait1/gsdgait1_sync.mp4
 
 ---
 
-## 5.3 解析側の選択
+## 5.3 解析側
 
-### FR-007 左右選択
+### FR-007 左右の解析（v1.1で変更）
 
-利用者は以下から解析対象側を選択できる。
+解析側の選択は廃止し、左右両方を同時に解析する。
 
-- Right
-- Left
-
-初期値は未選択、またはRightとする。
+- 同側ICが2回以上設定された側を解析対象とする
+- 左右とも周期があれば、1つの結果・1つのExcelに左右をまとめて出力する
+- 一方の側の必要変数がMOTに存在しない場合、その側のみ解析対象外として警告し、もう一方の側は解析する
 
 ### FR-008 対象変数の自動決定
 
@@ -251,46 +250,61 @@ Video Time: 1.7500 s
 
 ---
 
-## 5.5 IC選択
+## 5.5 歩行イベント設定（v1.1で変更）
 
-### FR-012 1回目IC設定
+### FR-012 歩行イベントの登録
 
-利用者が動画を確認し、現在位置を「1st IC」として登録できる。
+利用者が動画を確認し、現在位置を以下のいずれかのイベントとして登録できる。
+
+- Right IC（Initial Contact）
+- Right Toe Off
+- Left IC
+- Left Toe Off
+
+各イベントは何回でも登録できる。入力順は問わず、時刻順に並べて管理する。
+同じ側・種類・サンプルへの重複登録は警告して無視する。
 
 保存する情報：
 
+- 側（Right / Left）
+- 種類（IC / Toe Off）
 - MOTサンプル番号
 - MOT time
-- 動画時刻
+- 動画時刻（基準動画）
 
-### FR-013 2回目IC設定
+### FR-013 歩行周期の構成
 
-同様に現在位置を「2nd IC」として登録できる。
+同側の連続するIC間（IC → 次の同側IC）を1歩行周期とする。
 
-### FR-014 IC表示
+各周期について以下を求める（時刻ベース、周期の開始IC = 0%、次IC = 100%）。
 
-登録後、画面上に以下を表示する。
+- 周期時間 (s)
+- 立脚期 (%)：周期内の最初の同側Toe Offの位置。未設定の場合は空欄
+- 遊脚期 (%)：100 − 立脚期
+- 対側Toe Off (%)、対側IC (%)：周期内に登録されていれば付与（両脚支持期の確認用）
 
-```text
-1st IC: sample / time
-2nd IC: sample / time
-Gait cycle duration
-```
+周期時間が他周期の中央値の1.5倍を超える周期は、間のICの登録漏れの可能性として強調表示する。
 
-### FR-015 IC再設定
+### FR-014 イベント・周期の表示
 
-1st IC、2nd ICは解析実行前であれば何度でも上書きできる。
+- 登録済みイベントを一覧表示し、各イベントへの移動・削除ができる
+- 現在位置にあるイベントの行を強調表示する
+- スライダー下に各イベントの位置を目印として表示する（Right: 赤、Left: 青）
+- 構成された歩行周期を一覧表示する
+
+### FR-015 イベントの保持・再設定
+
+- イベントは個別削除・全削除ができる
+- 試行（MOT）ごとに保持し、試行を切り替えて戻っても設定内容を維持する（新しいZIPを読み込むと破棄）
+- イベントを変更した場合、以前の解析結果は無効として非表示にする
 
 ### FR-016 入力チェック
 
 解析実行には以下を必須とする。
 
 - MOTファイル選択済み
-- 解析側選択済み
-- 1st IC選択済み
-- 2nd IC選択済み
-- `2nd IC > 1st IC`
-- 必要な3関節変数が存在
+- 少なくとも一方の側で歩行周期が1つ以上ある（同側ICが2回以上）
+- 解析対象側の3関節変数が存在
 
 ---
 
@@ -298,13 +312,14 @@ Gait cycle duration
 
 ### FR-017 データ切り出し
 
-1st ICから2nd ICまでのデータを1歩行周期として抽出する。
+左右それぞれ、全歩行周期（IC → 次の同側IC）のデータを抽出する。
 
-1st ICおよび2nd ICのデータ点を両方含める。
+周期の開始ICおよび終了ICのデータ点を両方含める。
 
 ### FR-018 時間正規化
 
-抽出された1歩行周期を以下の101点へ正規化する。
+抽出された各歩行周期をそれぞれ以下の101点へ正規化する。
+さらに側ごとに、各点の周期間の平均と標準偏差（標本SD、n−1）を求める。1周期のみの場合SDは空欄とする。
 
 ```text
 0%, 1%, 2%, ... , 99%, 100%
@@ -357,6 +372,10 @@ ankle_angle_l
 - 横軸：Gait cycle (%)
 - 横軸範囲：0–100
 - 縦軸：Joint angle (deg)
+- 左右を同じグラフに重ねる（Right: 赤、Left: 青）
+- 太線：平均、帯：±SD、細線：各周期、破線：平均Toe Off位置
+
+グラフの上に、側ごとの周期数・周期時間・立脚期%（平均±SD）を表示する。
 
 ---
 
@@ -381,33 +400,41 @@ X axis: Gait cycle (%)
 Y axis: Joint angle (deg)
 ```
 
-### FR-024 Sheet 2: Normalized_Data
+### FR-024 Sheet 2: Gait_Events（v1.1）
 
-以下の形式で101点データを保存する。
-
-| Gait cycle (%) | Hip flexion | Knee flexion | Ankle angle |
-|---:|---:|---:|---:|
-| 0 | value | value | value |
-| 1 | value | value | value |
-| ... | ... | ... | ... |
-| 100 | value | value | value |
-
-### FR-025 Sheet 3: Original_Data
-
-1st ICから2nd ICまでの正規化前データを保存する。
-
-推奨列：
+登録した全イベントを時刻順に保存する。
 
 ```text
-Sample
-Time
-Gait cycle (%)
-Hip flexion
-Knee flexion
-Ankle angle
+Side / Event / MOT sample / MOT time (s) / Video time (s)
 ```
 
-### FR-026 Sheet 4: Metadata
+### FR-024a Sheet 3: Cycles（v1.1）
+
+周期ごとの時間パラメータと、側ごとの平均・SD行を保存する。
+
+```text
+Side / Cycle / IC sample / IC time / Next IC sample / Next IC time / Cycle duration
+Toe Off sample / Toe Off time / Stance (%) / Swing (%) / Opposite Toe Off (%) / Opposite IC (%)
+```
+
+### FR-024b Sheet 4: Normalized_Data
+
+101点データを保存する。1列目は Gait cycle (%)。続いて側ごとに各関節の平均・SD、その後に各周期の値を並べる。
+
+```text
+R Hip flexion mean / R Hip flexion SD / ... / L Ankle angle SD
+R C1 Hip flexion / R C1 Knee flexion / R C1 Ankle angle / R C2 ... / L C1 ...
+```
+
+### FR-025 Sheet 5: Original_Data
+
+各周期の正規化前データを縦持ちで保存する。
+
+```text
+Side / Cycle / MOT sample / Time / Gait cycle (%) / Hip flexion / Knee flexion / Ankle angle
+```
+
+### FR-026 Sheet 6: Metadata
 
 再現性確保のため、以下を保存する。
 
@@ -415,21 +442,21 @@ Ankle angle
 ZIP file name
 MOT file name
 Video file path
-Analysis side
-Hip variable
-Knee variable
-Ankle variable
-1st IC sample
-1st IC time
-2nd IC sample
-2nd IC time
-Gait cycle duration
-Original sample count
+Analyzed sides
+Gait cycle definition
+Number of events
 Normalization points
 Interpolation method
+SD definition
 Application version
 Export date/time
+Right / Left variables
+Right / Left cycles
 ```
+
+### FR-026a Sheet 7: Normalized_All_Data
+
+MOTの全変数を周期ごとに101点正規化し、縦持ちで保存する（Side / Cycle / Gait cycle (%) / 全変数）。
 
 ---
 
@@ -437,19 +464,58 @@ Export date/time
 
 ### FR-027 命名規則
 
-基本形式：
+基本形式（v1.1で左右をまとめて出力するため Side を省略）：
 
 ```text
-[ZIPファイル名]_[MOTファイル名]_[Side].xlsx
+[ZIPファイル名]_[MOTファイル名].xlsx
 ```
 
 例：
 
 ```text
-イシイタカシ_GSD歩行_gsdgait1_R.xlsx
+イシイタカシ_GSD歩行_gsdgait1.xlsx
 ```
 
 ファイル名として使用できない文字は自動的に置換または削除する。
+
+---
+
+## 5.10 身体重心（v1.2で追加）
+
+### FR-028 身体重心の算出
+
+ZIP内のスケーリング済みOpenSimモデル（`OpenSimData/Model/*.osim`、単眼セッションでは `OpenSimData/Model/{trial}/*.osim`）と
+MOTの関節座標から、ブラウザ上で順運動学を計算し、全体節の質量加重平均として身体重心を求める
+（OpenSim の `Model::calcMassCenterPosition` と同じ定義）。
+
+- 対応ジョイント：CustomJoint、PinJoint、WeldJoint（ほか Slider / Universal / Gimbal / Ball / Free）
+- 対応関数：Constant、LinearFunction、PolynomialFunction、MultiplierFunction、SimmSpline
+- 膝蓋骨などの従属座標は CoordinateCouplerConstraint から求める
+- MOTにない座標はモデルの既定値を使う
+- 速度は位置の中心差分で求める（追加のフィルタ処理は行わない）
+- モデルが見つからない・読み込めない場合は身体重心のみ算出せず、関節角度の解析は継続する
+
+### FR-029 身体重心の座標系
+
+- 鉛直：OpenSim地面座標系の y（上が正）
+- 前後(AP)：周期ごとに、開始IC→次ICの水平COM変位の向き
+- 左右(ML)：AP × 鉛直（右が正）
+- 水平変位が5 cm未満の周期（足踏み等）は進行方向を決められないため、地面座標系の x を前後とみなし、参考値として扱う
+
+### FR-030 身体重心の出力
+
+周期ごとに101点正規化し、側ごとに平均±SDを求める。
+
+- 時系列：鉛直変位・左右変位（各周期の平均位置基準, cm）、前後変位（周期開始基準, cm）、鉛直速度・前後速度（m/s）、地面座標系の絶対位置（m）
+- 周期ごとの指標：鉛直変位幅・左右変位幅（cm）、歩行速度（m/s, 周期内の水平変位 ÷ 周期時間）
+- 画面：鉛直変位・左右変位のグラフ、側ごとの指標（平均±SD）
+- Excel：Cycles シートに指標列、Graphs シートにグラフ、Sheet 8 `COM_Normalized` に時系列、Metadata にモデルファイル・総質量・算出方法
+
+### 検証（v1.2）
+
+実データ（LaiUhlrich2022_scaled.osim, 3試行）で、モデルマーカーの順運動学位置とIKに用いられた実測マーカー（*_study）の
+差は RMS 17.6〜20.0 mm（下肢 7〜10 mm）であった。CustomJoint の回転を空間固定として誤って計算した場合は RMS 104 mm となり、
+回転規約（物体固定・rotation1→2→3）の正しさを確認した。モデル総質量はセッション情報の体重と一致した。
 
 ---
 
@@ -468,10 +534,10 @@ Section 1
 
 Section 2
   Trial selection
-  Side selection
 
 Section 3
-  Video
+  Camera selection
+  Video (multiple, synchronized)
 
 Section 4
   Time / sample control
@@ -479,14 +545,14 @@ Section 4
   -1
   +1
   +10
-  slider
+  slider (with event marks)
 
 Section 5
-  Set 1st IC
-  Set 2nd IC
+  R IC / R Toe Off / L IC / L Toe Off
 
 Section 6
-  Selected IC information
+  Event list (jump / delete)
+  Gait cycle list
 
 Section 7
   Analyze button
@@ -566,9 +632,8 @@ Excel Metadataに解析条件を保存する。
 - データベース
 - 自動IC検出
 - AIによる歩行イベント判定
-- OpenSimの再計算
+- OpenSimの再計算（IK等。身体重心の算出に必要な順運動学のみブラウザで実装）
 - kineticデータ解析
-- 複数カメラ同時表示
 - サーバー側解析
 
 ---
@@ -580,13 +645,13 @@ Version 1.0は以下を満たした時点で完成とする。
 1. OpenCap ZIPをブラウザで読み込める
 2. Kinematics内のMOTを自動検出できる
 3. MOTを選択できる
-4. Right / Leftを選択できる
+4. 左右を同時に解析できる
 5. 対応する同期動画を自動表示でき、表示するカメラを選択・複数同時表示できる
 6. MOTのtimeに連動して動画位置を移動できる
-7. 1st IC / 2nd ICを指定できる
+7. 左右のIC / Toe Offを複数回指定できる
 8. 指定区間を101点に正規化できる
 9. Hip / Knee / Ankle角度を処理できる
 10. グラフを確認できる
-11. 4シート構成のExcelを出力できる
+11. 7シート構成のExcelを出力できる
 12. GitHub Pages上で動作する
 13. データが外部サーバーへ送信されない

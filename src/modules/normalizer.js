@@ -111,3 +111,50 @@ export function normalizeAllVariables(motData, firstIC, secondIC) {
     values,
   };
 }
+
+// 101点の系列の配列から、各点の平均と標本標準偏差（n-1）を求める。1周期のみの場合SDは空欄(null)。
+export function meanAndSD(seriesList) {
+  const n = seriesList.length;
+  const mean = [];
+  const sd = [];
+  for (let i = 0; i <= 100; i += 1) {
+    const values = seriesList.map((s) => s[i]);
+    const m = values.reduce((a, b) => a + b, 0) / n;
+    mean.push(m);
+    sd.push(n > 1 ? Math.sqrt(values.reduce((a, v) => a + (v - m) ** 2, 0) / (n - 1)) : null);
+  }
+  return { mean, sd };
+}
+
+export function scalarMeanSD(values) {
+  const valid = values.filter((v) => v !== null && v !== undefined);
+  if (valid.length === 0) return { mean: null, sd: null, n: 0 };
+  const m = valid.reduce((a, b) => a + b, 0) / valid.length;
+  const sd =
+    valid.length > 1 ? Math.sqrt(valid.reduce((a, v) => a + (v - m) ** 2, 0) / (valid.length - 1)) : null;
+  return { mean: m, sd, n: valid.length };
+}
+
+// 指定側の全歩行周期をそれぞれ101点へ正規化し、周期間の平均±SDをまとめる。
+export function analyzeSide(motData, side, cycles) {
+  const analyzedCycles = cycles.map((cycle) => {
+    const { original, normalized } = normalizeGaitCycle(motData, side, cycle.start, cycle.end);
+    const allNormalized = normalizeAllVariables(motData, cycle.start, cycle.end);
+    return { ...cycle, original, normalized, allNormalized };
+  });
+
+  const summary = {};
+  for (const joint of ['hip', 'knee', 'ankle']) {
+    summary[joint] = meanAndSD(analyzedCycles.map((c) => c.normalized[joint]));
+  }
+
+  return {
+    side,
+    cycles: analyzedCycles,
+    summary,
+    duration: scalarMeanSD(analyzedCycles.map((c) => c.duration)),
+    stancePercent: scalarMeanSD(analyzedCycles.map((c) => c.stancePercent)),
+    oppositeToeOffPercent: scalarMeanSD(analyzedCycles.map((c) => c.oppositeToeOffPercent)),
+    oppositeICPercent: scalarMeanSD(analyzedCycles.map((c) => c.oppositeICPercent)),
+  };
+}
