@@ -478,3 +478,14 @@ button.danger:hover:not(:disabled) {
 .excluded-cycles[hidden] {
   display: none;
 }
+
+/* ヘッダーの「使い方」リンク */
+.header-links {
+  margin: 0 0 4px;
+  font-size: 0.95rem;
+}
+
+.header-links a {
+  color: var(--color-primary);
+  font-weight: 600;
+}
