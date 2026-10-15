@@ -133,8 +133,9 @@
           <h3 class="subheading">身体重心 (COM)</h3>
           <div id="com-summary" class="result-summary"></div>
           <p class="status-text">
-            OpenSimモデルの全体節の質量加重平均から算出。鉛直・左右は各周期の平均位置からの変位、
-            左右は右方向を正（進行方向は各周期の開始IC→次ICの水平COM変位の向き）。
+            OpenSimモデルの全体節の質量加重平均から算出。グラフは地面座標系の原点からの位置（m）で、
+            鉛直は床（y=0）からの高さ、左右は原点からの水平位置を左右軸へ投影した値（右が正。
+            進行方向は各周期の開始IC→次ICの水平COM変位の向き）。
           </p>
           <div class="chart-grid">
             <canvas id="chart-com-vertical"></canvas>

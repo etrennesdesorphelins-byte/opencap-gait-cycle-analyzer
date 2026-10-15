@@ -8,6 +8,10 @@ import { normalizeTo101Points, meanAndSD, scalarMeanSD } from './normalizer.js';
 const MIN_PROGRESSION = 0.05;
 
 export const COM_SERIES = [
+  // 原点基準の位置。鉛直は地面座標系の y（OpenCapでは床がほぼ y=0）、
+  // 左右は原点からの水平位置を周期ごとの左右軸（右が正）へ投影した値
+  { key: 'verticalPos', label: 'COM vertical position', unit: 'm' },
+  { key: 'mlPos', label: 'COM mediolateral position', unit: 'm' },
   { key: 'vertical', label: 'COM vertical displacement', unit: 'cm' },
   { key: 'ml', label: 'COM mediolateral displacement', unit: 'cm' },
   { key: 'ap', label: 'COM anteroposterior displacement', unit: 'cm' },
@@ -45,6 +49,8 @@ function analyzeCycle(com, cycle) {
   const mz = mean(zs);
 
   const series = {
+    verticalPos: ys,
+    mlPos: xs.map((x, k) => x * right[0] + zs[k] * right[1]),
     vertical: ys.map((y) => (y - my) * 100),
     ml: xs.map((x, k) => ((x - mx) * right[0] + (zs[k] - mz) * right[1]) * 100),
     ap: xs.map((x, k) => ((x - xs[0]) * fwd[0] + (zs[k] - zs[0]) * fwd[1]) * 100),

@@ -645,15 +645,15 @@ el.btnAnalyze.addEventListener('click', () => {
   if (comResults) {
     state.charts.comVertical = renderChart(
       el.chartComVertical,
-      'COM Vertical Displacement',
-      comSides('vertical'),
-      'Displacement (cm)'
+      'COM Vertical Position',
+      comSides('verticalPos'),
+      'Position from origin (m)'
     );
     state.charts.comMl = renderChart(
       el.chartComMl,
-      'COM Mediolateral Displacement (+Right)',
-      comSides('ml'),
-      'Displacement (cm)'
+      'COM Mediolateral Position (+Right)',
+      comSides('mlPos'),
+      'Position from origin (m)'
     );
   }
 
@@ -710,7 +710,7 @@ el.btnDownloadExcel.addEventListener('click', async () => {
         ? 'Mass-weighted mean of all body COMs via forward kinematics of the scaled OpenSim model (MOT coordinates as exported by OpenCap, no additional filtering); velocity by central difference'
         : '(not computed)',
       'COM axes': comModel
-        ? 'Vertical = ground Y; AP = horizontal COM displacement direction from IC to next IC per cycle; ML = AP x vertical (+right)'
+        ? 'Vertical = ground Y (floor ~ 0); AP = horizontal COM displacement direction from IC to next IC per cycle; ML = AP x vertical (+right). Position columns are measured from the ground origin; displacement columns from the cycle mean (vertical/ML) or cycle start (AP)'
         : '(not computed)',
       'Application version': APP_VERSION,
       'Export date/time': new Date().toISOString(),
