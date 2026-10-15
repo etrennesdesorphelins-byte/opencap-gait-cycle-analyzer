@@ -27,12 +27,12 @@ import {
 } from './modules/gaitEvents.js';
 import { checkAnalysisReady, checkRequiredColumns } from './modules/validators.js';
 import { analyzeSideCycles, summarizeSide, scalarMeanSD } from './modules/normalizer.js';
-import { renderChart, chartToPngDataUrl } from './modules/chartRenderer.js';
+import { renderChart, chartToPngDataUrl, highlightCycle } from './modules/chartRenderer.js';
 import { buildWorkbook, downloadWorkbook } from './modules/excelExporter.js';
 import { buildExportFilename } from './utils/filename.js';
 import { clamp, round } from './utils/numbers.js';
 
-const APP_VERSION = '1.4.0';
+const APP_VERSION = '1.5.0';
 
 const el = {
   dropZone: document.getElementById('drop-zone'),
@@ -87,6 +87,13 @@ const el = {
 
   sectionResult: document.getElementById('section-result'),
   resultSummary: document.getElementById('result-summary'),
+  cyclePicker: document.getElementById('cycle-picker'),
+  btnExcludeCycle: document.getElementById('btn-exclude-cycle'),
+  selectedCycleInfo: document.getElementById('selected-cycle-info'),
+  excludedCycles: document.getElementById('excluded-cycles'),
+  excludedList: document.getElementById('excluded-list'),
+  btnRestoreAll: document.getElementById('btn-restore-all'),
+  cycleToolsError: document.getElementById('cycle-tools-error'),
   stTableBody: document.querySelector('#st-table tbody'),
   chartHip: document.getElementById('chart-hip'),
   chartKnee: document.getElementById('chart-knee'),
@@ -119,6 +126,9 @@ const state = {
   // 編集中の試行で展開済みの動画Blob（path → Blob）。カメラの再選択時に再展開しない
   videoBlobCache: new Map(),
   currentSampleIndex: 0,
+  // 解析から除外した歩行周期（cycleKey → 周期の情報）と、グラフで選択中の周期
+  excluded: new Map(),
+  selectedCycleKey: null,
   analysisResult: null,
   charts: null,
 };
@@ -341,7 +351,8 @@ function renderDatasetTable() {
 
   el.datasetTotal.textContent =
     state.datasets.length > 0
-      ? `解析対象: ${totalTrials} 試行（Right ${totals.R} 周期 / Left ${totals.L} 周期）`
+      ? `解析対象: ${totalTrials} 試行（Right ${totals.R} 周期 / Left ${totals.L} 周期）` +
+        (state.excluded.size > 0 ? `、うち除外 ${state.excluded.size} 周期` : '')
       : '';
 }
 
@@ -669,6 +680,12 @@ function renderCycleTable() {
         hasSuspicious = true;
       }
       if (c.toeOff === null) missingToeOff += 1;
+      const key = cycleKey(state.current, state.selectedTrial, side, c);
+      const status = document.createElement('td');
+      if (state.excluded.has(key)) {
+        tr.classList.add('excluded');
+        status.append('除外 ', button('戻す', 'secondary', () => restoreCycles([key])));
+      }
       tr.append(
         sideCell(side),
         textCell(String(c.number)),
@@ -676,7 +693,8 @@ function renderCycleTable() {
         textCell(round(c.duration, 3).toFixed(3)),
         textCell(fmt(c.stancePercent)),
         textCell(fmt(c.oppositeToeOffPercent)),
-        textCell(fmt(c.oppositeICPercent))
+        textCell(fmt(c.oppositeICPercent)),
+        status
       );
       el.cycleTableBody.appendChild(tr);
     });
@@ -855,9 +873,24 @@ function renderSpatioTemporalTable(sides, stResults, overallSpeed) {
   }
 }
 
-// 全試行の周期をまとめて解析する。各結果の cycles 配列は同じ順序（側ごとの通し番号）で並ぶ
+// 歩行周期の識別子（ZIP・試行・側・開始/終了サンプル）。イベントを編集してもその周期が残っていれば同じ値になる
+function cycleKey(dataset, trial, side, cycle) {
+  return `${dataset.id}|${trial.motPath}|${side}|${cycle.start.sampleIndex}-${cycle.end.sampleIndex}`;
+}
+
+// 全試行の周期のうち除外していないものをまとめて解析する。各結果の cycles 配列は同じ順序（側ごとの通し番号）で並ぶ
 function analyzeSources(sources) {
-  const sides = SIDES.filter((side) => sources.some((s) => s.sides.includes(side)));
+  // 除外していない周期（cycleInTrial は試行内の元の番号）
+  const included = sources.map((src) => {
+    const bySide = {};
+    for (const side of SIDES) {
+      bySide[side] = src.sides.includes(side)
+        ? src.bySide[side].filter((c) => !state.excluded.has(cycleKey(src.dataset, src.trial, side, c)))
+        : [];
+    }
+    return bySide;
+  });
+  const sides = SIDES.filter((side) => included.some((bySide) => bySide[side].length > 0));
   const comAvailable = sources.every((s) => s.data.com);
   const sideResults = {};
   const stResults = {};
@@ -867,18 +900,24 @@ function analyzeSources(sources) {
     const jointCycles = [];
     const stCycles = [];
     const comCycles = [];
-    for (const src of sources) {
-      if (!src.sides.includes(side)) continue;
-      const cycles = src.bySide[side];
+    sources.forEach((src, si) => {
+      const cycles = included[si][side];
+      if (cycles.length === 0) return;
       const analyzed = analyzeSideCycles(src.data.motData, side, cycles);
       const st = cycles.map((c) => computeCycleParameters(c, { com: src.data.com, markers: src.data.markers }));
       const com = comAvailable ? analyzeComCycles(src.data.com, cycles) : null;
       analyzed.forEach((c, k) => {
-        jointCycles.push({ ...c, zipName: src.dataset.file.name, trialName: src.trial.motName, cycleInTrial: c.number });
+        jointCycles.push({
+          ...c,
+          key: cycleKey(src.dataset, src.trial, side, c),
+          zipName: src.dataset.file.name,
+          trialName: src.trial.motName,
+          cycleInTrial: c.number,
+        });
         stCycles.push(st[k]);
         if (com) comCycles.push(com[k]);
       });
-    }
+    });
     jointCycles.forEach((c, i) => {
       c.number = i + 1;
     });
@@ -887,12 +926,14 @@ function analyzeSources(sources) {
     if (comResults) comResults[side] = summarizeCom(comCycles);
   }
 
-  const trials = sources.map((src) => {
+  const trials = sources.map((src, si) => {
     const speed = computeTrialSpeed(src.trial.events, { com: src.data.com, markers: src.data.markers });
+    const total = (side) => (src.sides.includes(side) ? src.bySide[side].length : 0);
     return {
       zipName: src.dataset.file.name,
       trialName: src.trial.motName,
-      cycles: { R: src.sides.includes('R') ? src.bySide.R.length : 0, L: src.sides.includes('L') ? src.bySide.L.length : 0 },
+      cycles: { R: included[si].R.length, L: included[si].L.length },
+      excludedCycles: total('R') + total('L') - included[si].R.length - included[si].L.length,
       speed,
       speedReference: src.data.com ? 'Body COM' : 'Pelvis marker center',
       comModel: src.data.comModel,
@@ -908,8 +949,20 @@ function analyzeSources(sources) {
   return { sides, sideResults, stResults, comResults, comAvailable, trials, overallSpeed, events };
 }
 
-el.btnAnalyze.addEventListener('click', () => {
+// イベントの編集で存在しなくなった周期を除外リストから外す
+function pruneExcluded(sources) {
+  const existing = new Set();
+  for (const src of sources) {
+    for (const side of SIDES) src.bySide[side].forEach((c) => existing.add(cycleKey(src.dataset, src.trial, side, c)));
+  }
+  for (const key of [...state.excluded.keys()]) {
+    if (!existing.has(key)) state.excluded.delete(key);
+  }
+}
+
+function runAnalysis() {
   const sources = collectSources();
+  pruneExcluded(sources);
   const { ok, errors } = checkSources(sources);
   if (!ok) {
     el.analyzeError.textContent = errors.join(' ');
@@ -921,7 +974,13 @@ el.btnAnalyze.addEventListener('click', () => {
   const usable = sources.filter((s) => s.sides.length > 0);
   const result = analyzeSources(usable);
   const { sides, sideResults, stResults, comResults } = result;
-  state.analysisResult = { ...result, sources: usable };
+  if (sides.length === 0) {
+    el.analyzeError.textContent = '全ての歩行周期が除外されています。除外した周期を戻してください。';
+    return;
+  }
+  state.analysisResult = { ...result, sources: usable, excluded: [...state.excluded.values()] };
+  const allKeys = new Set(sides.flatMap((side) => sideResults[side].cycles.map((c) => c.key)));
+  if (!allKeys.has(state.selectedCycleKey)) state.selectedCycleKey = null;
 
   const chartSides = (pick) =>
     sides.map((side) => {
@@ -930,6 +989,7 @@ el.btnAnalyze.addEventListener('click', () => {
         side,
         label: SIDE_LABELS[side],
         cycles,
+        cycleKeys: sideResults[side].cycles.map((c) => c.key),
         mean: summary.mean,
         sd: summary.sd,
         toeOffPercent: sideResults[side].stancePercent.mean,
@@ -945,13 +1005,14 @@ el.btnAnalyze.addEventListener('click', () => {
       cycles: comResults[side].cycles.map((c) => c.normalized[key]),
       summary: comResults[side].summary[key],
     }));
+  const chartOptions = { onCycleClick: selectCycle, selectedKey: state.selectedCycleKey };
 
   showSection(el.sectionResult, true);
   showSection(el.comResult, true);
   state.charts = {
-    hip: renderChart(el.chartHip, 'Hip Flexion Angle', jointSides('hip')),
-    knee: renderChart(el.chartKnee, 'Knee Flexion Angle', jointSides('knee')),
-    ankle: renderChart(el.chartAnkle, 'Ankle Angle', jointSides('ankle')),
+    hip: renderChart(el.chartHip, 'Hip Flexion Angle', jointSides('hip'), 'Angle (deg)', chartOptions),
+    knee: renderChart(el.chartKnee, 'Knee Flexion Angle', jointSides('knee'), 'Angle (deg)', chartOptions),
+    ankle: renderChart(el.chartAnkle, 'Ankle Angle', jointSides('ankle'), 'Angle (deg)', chartOptions),
   };
   el.chartComVertical.hidden = !comResults;
   el.chartComMl.hidden = !comResults;
@@ -960,13 +1021,15 @@ el.btnAnalyze.addEventListener('click', () => {
       el.chartComVertical,
       'COM Vertical Position',
       comSides('verticalPos'),
-      'Position from origin (m)'
+      'Position from origin (m)',
+      chartOptions
     );
     state.charts.comMl = renderChart(
       el.chartComMl,
       'COM Mediolateral Position (+Right)',
       comSides('mlPos'),
-      'Position from origin (m)'
+      'Position from origin (m)',
+      chartOptions
     );
   }
 
@@ -974,7 +1037,9 @@ el.btnAnalyze.addEventListener('click', () => {
   el.comSummary.innerHTML = '';
   const zipCount = new Set(usable.map((s) => s.dataset)).size;
   const scope = document.createElement('p');
-  scope.textContent = `解析対象: ZIP ${zipCount} 件・${usable.length} 試行`;
+  scope.textContent =
+    `解析対象: ZIP ${zipCount} 件・${usable.length} 試行` +
+    (state.excluded.size > 0 ? `（除外した周期 ${state.excluded.size} 件）` : '');
   el.resultSummary.appendChild(scope);
   sides.forEach((side) => {
     const p = document.createElement('p');
@@ -997,10 +1062,119 @@ el.btnAnalyze.addEventListener('click', () => {
   }
 
   renderSpatioTemporalTable(sides, stResults, result.overallSpeed);
+  renderCycleTools();
 
   showSection(el.sectionDownload, true);
   el.downloadStatus.textContent = '';
+}
+
+el.btnAnalyze.addEventListener('click', runAnalysis);
+
+// ---------- Section 8: Cycle selection / exclusion ----------
+
+function cycleLabel(side, info) {
+  return `${SIDE_LABELS[side]} · ${info.zipName} / ${info.trialName} · 周期 ${info.cycleInTrial}（sample ${info.startSample}→${info.endSample}）`;
+}
+
+function cycleInfoOf(side, c) {
+  return {
+    key: c.key,
+    side,
+    zipName: c.zipName,
+    trialName: c.trialName,
+    cycleInTrial: c.cycleInTrial,
+    startSample: c.start.sampleIndex + 1,
+    endSample: c.end.sampleIndex + 1,
+    startTime: c.start.motTime,
+    endTime: c.end.motTime,
+  };
+}
+
+function analyzedCycleInfos() {
+  const r = state.analysisResult;
+  if (!r) return [];
+  return r.sides.flatMap((side) => r.sideResults[side].cycles.map((c) => ({ ...cycleInfoOf(side, c), number: c.number })));
+}
+
+// 選択中の周期の表示、周期の一覧（プルダウン）、除外した周期の一覧を更新する
+function renderCycleTools() {
+  const infos = analyzedCycleInfos();
+  el.cyclePicker.innerHTML = '';
+  const none = document.createElement('option');
+  none.value = '';
+  none.textContent = '（選択なし）';
+  el.cyclePicker.appendChild(none);
+  for (const info of infos) {
+    const opt = document.createElement('option');
+    opt.value = info.key;
+    opt.textContent = `${info.side} C${info.number}: ${cycleLabel(info.side, info)}`;
+    el.cyclePicker.appendChild(opt);
+  }
+  el.cyclePicker.value = state.selectedCycleKey || '';
+
+  const selected = infos.find((i) => i.key === state.selectedCycleKey);
+  el.btnExcludeCycle.disabled = !selected;
+  el.selectedCycleInfo.textContent = selected
+    ? `選択中: ${cycleLabel(selected.side, selected)}（全てのグラフでオレンジ色の線）`
+    : 'グラフの細線をクリックするか、一覧から歩行周期を選択してください。';
+
+  el.excludedList.innerHTML = '';
+  for (const info of state.excluded.values()) {
+    const li = document.createElement('li');
+    const text = document.createElement('span');
+    text.textContent = `${info.side} · ${info.trialName} 周期 ${info.cycleInTrial}`;
+    text.title = cycleLabel(info.side, info);
+    li.append(text, button('戻す', 'secondary', () => restoreCycles([info.key])));
+    el.excludedList.appendChild(li);
+  }
+  el.excludedCycles.hidden = state.excluded.size === 0;
+}
+
+function selectCycle(key) {
+  state.selectedCycleKey = key || null;
+  el.cycleToolsError.textContent = '';
+  if (state.charts) {
+    Object.values(state.charts).forEach((chart) => highlightCycle(chart, state.selectedCycleKey));
+  }
+  renderCycleTools();
+}
+
+function excludeCycle(key) {
+  const infos = analyzedCycleInfos();
+  const info = infos.find((i) => i.key === key);
+  if (!info) return;
+  if (infos.length <= 1) {
+    el.cycleToolsError.textContent = '最後の1周期は除外できません。';
+    return;
+  }
+  const { number, ...rest } = info;
+  state.excluded.set(key, rest);
+  state.selectedCycleKey = null;
+  el.cycleToolsError.textContent = '';
+  onExclusionChanged();
+}
+
+function restoreCycles(keys) {
+  keys.forEach((k) => state.excluded.delete(k));
+  onExclusionChanged();
+}
+
+// 除外の変更を解析結果・周期一覧・ZIP一覧に反映する
+function onExclusionChanged() {
+  renderCycleTable();
+  renderDatasetTable();
+  if (state.analysisResult) {
+    runAnalysis();
+  } else {
+    renderCycleTools();
+  }
+}
+
+el.cyclePicker.addEventListener('change', (e) => selectCycle(e.target.value));
+el.btnExcludeCycle.addEventListener('click', () => {
+  if (state.selectedCycleKey) excludeCycle(state.selectedCycleKey);
 });
+el.btnRestoreAll.addEventListener('click', () => restoreCycles([...state.excluded.keys()]));
 
 // ---------- Section 9: Excel download ----------
 
@@ -1016,11 +1190,14 @@ el.btnDownloadExcel.addEventListener('click', async () => {
   el.downloadStatus.textContent = 'Excelを生成中...';
 
   try {
-    const { sideResults, stResults, comResults, sides, events, trials, overallSpeed, sources } = state.analysisResult;
+    const { sideResults, stResults, comResults, sides, events, trials, overallSpeed, sources, excluded } = state.analysisResult;
 
+    // グラフ画像は選択中の周期を強調しない状態で出力する
     const chartImages = {};
     for (const [key, chart] of Object.entries(state.charts)) {
+      if (state.selectedCycleKey) highlightCycle(chart, null);
       chartImages[key] = chartToPngDataUrl(chart);
+      if (state.selectedCycleKey) highlightCycle(chart, state.selectedCycleKey);
     }
 
     const metadata = {
@@ -1030,6 +1207,7 @@ el.btnDownloadExcel.addEventListener('click', async () => {
       'Analyzed sides': sides.map((s) => SIDE_LABELS[s]).join(', '),
       'Gait cycle definition': 'Consecutive ipsilateral IC to IC (cycles pooled across all trials and ZIP files)',
       'Number of events': events.length,
+      'Excluded cycles': excluded.length,
       'Normalization points': 101,
       'Interpolation method': 'linear',
       'SD definition': 'Sample SD (n-1), across pooled cycles (walking speed: across trials)',
@@ -1055,6 +1233,7 @@ el.btnDownloadExcel.addEventListener('click', async () => {
       comResults,
       trials,
       overallSpeed,
+      excluded,
       metadata,
     });
 

@@ -106,7 +106,7 @@
         <div class="table-scroll">
           <table id="cycle-table" class="data-table">
             <thead>
-              <tr><th>Side</th><th>Cycle</th><th>IC → 次IC (sample)</th><th>Duration (s)</th><th>Stance (%)</th><th>Opp. TO (%)</th><th>Opp. IC (%)</th></tr>
+              <tr><th>Side</th><th>Cycle</th><th>IC → 次IC (sample)</th><th>Duration (s)</th><th>Stance (%)</th><th>Opp. TO (%)</th><th>Opp. IC (%)</th><th>状態</th></tr>
             </thead>
             <tbody></tbody>
           </table>
@@ -149,7 +149,24 @@
       <section id="section-result" class="card" hidden>
         <h2>8. 解析結果プレビュー</h2>
         <div id="result-summary" class="result-summary"></div>
-        <p class="status-text">太線: 平均、帯: ±SD、細線: 各周期、破線: 平均Toe Off位置</p>
+        <div id="cycle-tools" class="cycle-tools">
+          <div class="cycle-tools-row">
+            <label for="cycle-picker">歩行周期</label>
+            <select id="cycle-picker"></select>
+            <button id="btn-exclude-cycle" type="button" class="danger" disabled>この周期を除外</button>
+          </div>
+          <p id="selected-cycle-info" class="status-text"></p>
+          <div id="excluded-cycles" class="excluded-cycles" hidden>
+            <span class="excluded-title">除外した周期</span>
+            <ul id="excluded-list"></ul>
+            <button id="btn-restore-all" type="button" class="secondary">すべて戻す</button>
+          </div>
+          <p id="cycle-tools-error" class="error-text" role="alert"></p>
+        </div>
+        <p class="status-text">
+          太線: 平均、帯: ±SD、細線: 各周期、破線: 平均Toe Off位置。細線をクリックするとその歩行周期を選択し、全てのグラフで強調表示します。
+          除外した周期は関節角度・身体重心・時間・距離因子・Excel出力の全てから除かれます（歩行速度は試行単位のため変わりません）。
+        </p>
         <div class="chart-grid">
           <canvas id="chart-hip"></canvas>
           <canvas id="chart-knee"></canvas>

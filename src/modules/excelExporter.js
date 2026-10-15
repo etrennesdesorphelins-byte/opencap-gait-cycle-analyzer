@@ -19,7 +19,8 @@ const blankIfNull = (v) => (v === null || v === undefined ? null : v);
 // comResults: { R?: summarizeCom結果, L?: ... }（cycles は同じ順）または null（身体重心を算出できない試行がある場合）
 // events: 全試行のイベント（zipName/trialName 付き）
 // trials: 試行ごとの情報（歩行速度など）、overallSpeed: 試行間の歩行速度の平均/SD
-export function buildWorkbook({ chartImages, events, sideResults, stResults, comResults, trials, overallSpeed, metadata }) {
+// excluded: 解析から除外した歩行周期の情報
+export function buildWorkbook({ chartImages, events, sideResults, stResults, comResults, trials, overallSpeed, excluded = [], metadata }) {
   const workbook = new ExcelJS.Workbook();
   workbook.creator = 'OpenCap Gait Cycle Analyzer';
   workbook.created = new Date();
@@ -165,6 +166,7 @@ export function buildWorkbook({ chartImages, events, sideResults, stResults, com
     ...SOURCE_COLUMNS,
     { header: 'Right cycles', key: 'rCycles', width: 13 },
     { header: 'Left cycles', key: 'lCycles', width: 12 },
+    { header: 'Excluded cycles', key: 'excluded', width: 16 },
     { header: 'Walking speed (m/s)', key: 'speed', width: 19 },
     { header: 'Distance (m)', key: 'distance', width: 13 },
     { header: 'Duration (s)', key: 'duration', width: 13 },
@@ -181,6 +183,7 @@ export function buildWorkbook({ chartImages, events, sideResults, stResults, com
       trial: t.trialName,
       rCycles: t.cycles.R,
       lCycles: t.cycles.L,
+      excluded: t.excludedCycles,
       speed: t.speed ? t.speed.speed : null,
       distance: t.speed ? t.speed.distance : null,
       duration: t.speed ? t.speed.duration : null,
@@ -347,6 +350,30 @@ export function buildWorkbook({ chartImages, events, sideResults, stResults, com
       comSheet.addRow(row);
     }
   }
+
+  // Sheet 11: Excluded_Cycles（グラフから除外した歩行周期。解析の再現用）
+  const exSheet = workbook.addWorksheet('Excluded_Cycles');
+  exSheet.columns = [
+    { header: 'Side', key: 'side', width: 8 },
+    ...SOURCE_COLUMNS,
+    { header: 'Cycle in trial', key: 'cycleInTrial', width: 14 },
+    { header: 'IC sample', key: 'startSample', width: 11 },
+    { header: 'IC time (s)', key: 'startTime', width: 12 },
+    { header: 'Next IC sample', key: 'endSample', width: 15 },
+    { header: 'Next IC time (s)', key: 'endTime', width: 15 },
+  ];
+  excluded.forEach((x) => {
+    exSheet.addRow({
+      side: SIDE_NAMES[x.side],
+      zip: x.zipName,
+      trial: x.trialName,
+      cycleInTrial: x.cycleInTrial,
+      startSample: x.startSample,
+      startTime: x.startTime,
+      endSample: x.endSample,
+      endTime: x.endTime,
+    });
+  });
 
   return workbook;
 }
