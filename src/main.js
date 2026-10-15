@@ -1,10 +1,9 @@
 import './styles/main.css';
 
 import { loadZip } from './modules/zipLoader.js';
-import { buildTrialList, loadTrialData } from './modules/trialManager.js';
+import { buildTrialList, loadTrialData, loadVideoBlob } from './modules/trialManager.js';
 import { getColumn } from './modules/motParser.js';
-import { VideoController } from './modules/videoController.js';
-import { VideoZoomController } from './modules/videoZoom.js';
+import { VideoGrid } from './modules/videoGrid.js';
 import { createICState, setIC, resetIC, isICValid, gaitCycleDuration } from './modules/icSelector.js';
 import { checkAnalysisReady, checkRequiredColumns, SIDE_VARIABLES } from './modules/validators.js';
 import { normalizeGaitCycle, normalizeAllVariables } from './modules/normalizer.js';
@@ -27,13 +26,10 @@ const el = {
   selectionError: document.getElementById('selection-error'),
 
   sectionVideo: document.getElementById('section-video'),
-  videoWrapper: document.getElementById('video-wrapper'),
-  video: document.getElementById('sync-video'),
+  cameraSelectRow: document.getElementById('camera-select-row'),
+  cameraSelect: document.getElementById('camera-select'),
+  videoGrid: document.getElementById('video-grid'),
   videoStatus: document.getElementById('video-status'),
-  btnZoomIn: document.getElementById('btn-zoom-in'),
-  btnZoomOut: document.getElementById('btn-zoom-out'),
-  btnZoomReset: document.getElementById('btn-zoom-reset'),
-  zoomLevelDisplay: document.getElementById('zoom-level-display'),
 
   sectionControls: document.getElementById('section-controls'),
   btnBack10: document.getElementById('btn-step-back-10'),
@@ -66,12 +62,7 @@ const el = {
   downloadStatus: document.getElementById('download-status'),
 };
 
-const videoController = new VideoController(el.video);
-const videoZoom = new VideoZoomController(el.videoWrapper, el.video, el.zoomLevelDisplay);
-
-el.btnZoomIn.addEventListener('click', () => videoZoom.zoomIn());
-el.btnZoomOut.addEventListener('click', () => videoZoom.zoomOut());
-el.btnZoomReset.addEventListener('click', () => videoZoom.reset());
+const videoGrid = new VideoGrid(el.videoGrid);
 
 const state = {
   zipFile: null,
@@ -80,7 +71,10 @@ const state = {
   selectedTrial: null,
   motData: null,
   timeArray: null,
-  hasVideo: false,
+  // 表示中のカメラ名。試行を切り替えても、同じカメラがあれば選択を引き継ぐ
+  selectedCameras: new Set(['Cam0']),
+  // 選択中の試行で展開済みの動画Blob（path → Blob）。カメラの再選択時に再展開しない
+  videoBlobCache: new Map(),
   selectedSide: 'R',
   currentSampleIndex: 0,
   icState: createICState(),
@@ -171,24 +165,18 @@ async function selectTrial(index) {
   el.selectionError.textContent = '';
 
   try {
-    const { motData, videoBlob } = await loadTrialData(state.zipInstance, trial);
+    const { motData } = await loadTrialData(state.zipInstance, trial);
     state.motData = motData;
     state.timeArray = getColumn(motData, 'time');
-    state.hasVideo = Boolean(videoBlob);
     state.currentSampleIndex = 0;
 
     if (!state.timeArray) {
       throw new Error('MOTファイルに time 列が見つかりません。');
     }
 
-    videoController.setSource(videoBlob);
-    videoZoom.reset();
-    if (videoBlob) {
-      el.videoStatus.textContent = '';
-    } else {
-      el.videoStatus.textContent =
-        '選択したMOTに対応するCam0同期動画が見つかりません。動画なしでも解析は可能ですが、IC選択を動画で確認できません。';
-    }
+    state.videoBlobCache = new Map();
+    renderCameraSelect(trial);
+    await updateDisplayedVideos();
 
     el.timeSlider.min = '0';
     el.timeSlider.max = String(state.timeArray.length - 1);
@@ -239,7 +227,89 @@ document.querySelectorAll('input[name="side"]').forEach((radio) => {
   });
 });
 
-// ---------- Section 3 & 4: Video + sample stepping ----------
+// ---------- Section 3: Video / camera selection ----------
+
+function renderCameraSelect(trial) {
+  el.cameraSelect.innerHTML = '';
+  const cameras = trial.videos.map((v) => v.camera);
+
+  // 前の試行で選んだカメラがこの試行に1つもなければ、先頭のカメラを表示する
+  if (!cameras.some((c) => state.selectedCameras.has(c)) && cameras.length > 0) {
+    state.selectedCameras = new Set([cameras[0]]);
+  }
+
+  for (const video of trial.videos) {
+    const label = document.createElement('label');
+    label.title = video.path;
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.value = video.camera;
+    checkbox.checked = state.selectedCameras.has(video.camera);
+    checkbox.addEventListener('change', onCameraToggle);
+    label.append(checkbox, ` ${video.camera}`);
+    el.cameraSelect.appendChild(label);
+  }
+  el.cameraSelectRow.hidden = trial.videos.length === 0;
+}
+
+async function onCameraToggle(e) {
+  const camera = e.target.value;
+  if (e.target.checked) {
+    state.selectedCameras.add(camera);
+  } else {
+    state.selectedCameras.delete(camera);
+  }
+  try {
+    const applied = await updateDisplayedVideos();
+    if (applied) await goToSample(state.currentSampleIndex);
+  } catch (err) {
+    el.videoStatus.textContent = err.message || '動画の読み込みに失敗しました。';
+  }
+}
+
+async function getVideoBlob(video) {
+  if (!state.videoBlobCache.has(video.path)) {
+    state.videoBlobCache.set(video.path, await loadVideoBlob(state.zipInstance, video));
+  }
+  return state.videoBlobCache.get(video.path);
+}
+
+// チェックボックスを連続で切り替えた場合に、古い展開結果で表示を上書きしないための世代カウンタ
+let videoLoadRequestId = 0;
+
+// 選択中のカメラの動画を展開して表示する。後続の呼び出しに追い越された場合は false を返す
+async function updateDisplayedVideos() {
+  const requestId = ++videoLoadRequestId;
+  const trial = state.selectedTrial;
+  const selected = trial.videos.filter((v) => state.selectedCameras.has(v.camera));
+
+  if (selected.length > 0) {
+    el.videoStatus.textContent = '動画を読み込み中...';
+  }
+  const loaded = await Promise.all(selected.map(async (v) => ({ ...v, blob: await getVideoBlob(v) })));
+  if (requestId !== videoLoadRequestId) return false;
+
+  videoGrid.setVideos(loaded);
+
+  if (trial.videos.length === 0) {
+    el.videoStatus.textContent =
+      '選択したMOTに対応する同期動画が見つかりません。動画なしでも解析は可能ですが、IC選択を動画で確認できません。';
+  } else if (loaded.length === 0) {
+    el.videoStatus.textContent = '表示するカメラが選択されていません。動画なしでも解析は可能です。';
+  } else if (loaded.length > 1) {
+    el.videoStatus.textContent = `全ての動画は同じMOT時刻に同期して表示されます。Video Time は ${videoGrid.primary.camera}（基準）の値です。`;
+  } else {
+    el.videoStatus.textContent = '';
+  }
+  return true;
+}
+
+// 基準動画（先頭パネル）の現在時刻。動画がなければMOT時刻を返す
+function primaryVideoTime(motTime) {
+  return videoGrid.hasVideo() ? videoGrid.primary.video.currentTime : motTime;
+}
+
+// ---------- Section 4: Sample stepping ----------
 
 // 連続してgoToSampleが呼ばれた場合、動画シークの完了順が呼び出し順と
 // 入れ替わることがある（例: IC1設定直後にIC2へ素早く移動する等）。
@@ -256,13 +326,11 @@ async function goToSample(idx) {
 
   el.timeSlider.value = String(clamped);
 
-  if (state.hasVideo) {
-    await videoController.seekToTime(motTime);
-  }
+  await videoGrid.seekAll(motTime);
 
   if (requestId !== goToSampleRequestId) return; // 後続の呼び出しに追い越された
 
-  const videoTime = state.hasVideo ? el.video.currentTime : motTime;
+  const videoTime = primaryVideoTime(motTime);
 
   el.sampleInfo.textContent = `Sample: ${clamped + 1} / ${state.timeArray.length}`;
   el.timeInfo.textContent = `MOT Time: ${round(motTime, 4)} s / Video Time: ${round(videoTime, 4)} s`;
@@ -278,7 +346,7 @@ el.timeSlider.addEventListener('input', (e) => goToSample(Number(e.target.value)
 
 function currentICPoint() {
   const motTime = state.timeArray[state.currentSampleIndex];
-  const videoTime = state.hasVideo ? el.video.currentTime : motTime;
+  const videoTime = primaryVideoTime(motTime);
   return { sampleIndex: state.currentSampleIndex, motTime, videoTime };
 }
 
@@ -378,7 +446,10 @@ el.btnDownloadExcel.addEventListener('click', async () => {
     const metadata = {
       'ZIP file name': state.zipFile.name,
       'MOT file name': state.selectedTrial.motName,
-      'Video file path': state.selectedTrial.videoPath || '(not found)',
+      'Video file path':
+        state.selectedTrial.videos.length === 0
+          ? '(not found)'
+          : videoGrid.panels.map((p) => p.path).join('; ') || '(not displayed)',
       'Analysis side': side === 'R' ? 'Right' : 'Left',
       'Hip variable': vars.hip,
       'Knee variable': vars.knee,

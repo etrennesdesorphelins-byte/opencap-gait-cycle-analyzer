@@ -54,27 +54,56 @@ function extractRootPrefix(motPath) {
   return match ? match[1] || '' : '';
 }
 
-// MOTファイル名から対応する同期動画を探索する。
-// 第一候補: 同じルート配下の Videos/Cam0/InputMedia/{base}/{base}_sync.mp4 への完全一致
-// フォールバック: ZIP全体から */{base}_sync.mp4 を検索
-export function findVideoForMot(zip, motPath) {
-  const base = baseNameWithoutExt(motPath);
-  const root = extractRootPrefix(motPath);
+const CAMERA_SEGMENT_RE = /(^|\/)(cam\d+)\//i;
+
+function cameraNumber(camera) {
+  const match = camera.match(/\d+/);
+  return match ? Number(match[0]) : Number.MAX_SAFE_INTEGER;
+}
+
+// MOTファイル名から対応する同期動画を全カメラ分探索する。
+// 第一候補: 同じルート配下の Videos/Cam{N}/InputMedia/{base}/{base}_sync.mp4
+// フォールバック: 第一候補が1件もない場合のみ、ZIP全体から */{base}_sync.mp4 を検索
+// 戻り値は [{ camera: 'Cam0', path }] をカメラ番号順に並べたもの。
+export function findVideosForMot(zip, motPath) {
+  const base = baseNameWithoutExt(motPath).toLowerCase();
+  const root = extractRootPrefix(motPath).toLowerCase();
   const index = buildEntryIndex(zip);
+  const fileName = `${base}_sync.mp4`;
 
-  const primaryPath = `${root}videos/cam0/inputmedia/${base}/${base}_sync.mp4`.toLowerCase();
-  if (index.has(primaryPath)) {
-    return index.get(primaryPath).name;
-  }
+  const toVideo = (entry, idx) => {
+    const camMatch = entry.name.replace(/\\/g, '/').match(CAMERA_SEGMENT_RE);
+    return { camera: camMatch ? camMatch[2] : `Video${idx + 1}`, path: entry.name };
+  };
 
-  const fallbackSuffix = `/${base}_sync.mp4`.toLowerCase();
+  let entries = [];
   for (const [normPath, entry] of index) {
-    if (normPath.endsWith(fallbackSuffix)) {
-      return entry.name;
+    if (!normPath.startsWith(`${root}videos/`)) continue;
+    const rest = normPath.slice(`${root}videos/`.length);
+    if (/^cam\d+\/inputmedia\/[^/]+\/[^/]+$/.test(rest) && rest.endsWith(`/${base}/${fileName}`)) {
+      entries.push(entry);
     }
   }
 
-  return null;
+  if (entries.length === 0) {
+    for (const [normPath, entry] of index) {
+      if (normPath === fileName || normPath.endsWith(`/${fileName}`)) {
+        entries.push(entry);
+      }
+    }
+  }
+
+  const videos = entries.map(toVideo);
+  videos.sort((a, b) => cameraNumber(a.camera) - cameraNumber(b.camera) || a.path.localeCompare(b.path));
+
+  // 同名カメララベルの重複（フォールバック時）を避ける
+  const seen = new Map();
+  for (const v of videos) {
+    const count = seen.get(v.camera) || 0;
+    seen.set(v.camera, count + 1);
+    if (count > 0) v.camera = `${v.camera} (${count + 1})`;
+  }
+  return videos;
 }
 
 export async function extractMotText(zip, motPath) {

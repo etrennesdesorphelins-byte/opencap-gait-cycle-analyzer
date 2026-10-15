@@ -48,15 +48,11 @@
       <!-- Section 3: Video -->
       <section id="section-video" class="card" hidden>
         <h2>3. 同期動画</h2>
-        <div id="video-wrapper" class="video-wrapper">
-          <video id="sync-video" controls playsinline></video>
+        <div class="field-row" id="camera-select-row">
+          <label>表示するカメラ</label>
+          <div id="camera-select" class="checkbox-group"></div>
         </div>
-        <div class="zoom-controls">
-          <button id="btn-zoom-out" type="button" aria-label="縮小">－</button>
-          <span id="zoom-level-display" class="zoom-level">100%</span>
-          <button id="btn-zoom-in" type="button" aria-label="拡大">＋</button>
-          <button id="btn-zoom-reset" type="button">リセット</button>
-        </div>
+        <div id="video-grid" class="video-grid"></div>
         <p id="video-status" class="status-text"></p>
       </section>
 

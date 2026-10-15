@@ -1,4 +1,4 @@
-import { findMotFiles, findVideoForMot, extractMotText, extractVideoBlob } from './zipLoader.js';
+import { findMotFiles, findVideosForMot, extractMotText, extractVideoBlob } from './zipLoader.js';
 import { parseMot } from './motParser.js';
 
 export function buildTrialList(zip) {
@@ -6,19 +6,18 @@ export function buildTrialList(zip) {
   return motFiles.map((mot) => ({
     motPath: mot.path,
     motName: mot.name,
-    videoPath: findVideoForMot(zip, mot.path),
+    videos: findVideosForMot(zip, mot.path),
   }));
 }
 
-// 選択された試行のみを展開する（大容量ZIP対策）
+// 選択された試行のMOTのみを展開する（大容量ZIP対策）。
+// 動画は表示対象に選ばれたカメラ分だけ loadVideoBlob で個別に展開する。
 export async function loadTrialData(zip, trial) {
   const motText = await extractMotText(zip, trial.motPath);
   const motData = parseMot(motText);
+  return { motData };
+}
 
-  let videoBlob = null;
-  if (trial.videoPath) {
-    videoBlob = await extractVideoBlob(zip, trial.videoPath);
-  }
-
-  return { motData, videoBlob };
+export function loadVideoBlob(zip, video) {
+  return extractVideoBlob(zip, video.path);
 }

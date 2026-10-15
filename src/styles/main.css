@@ -95,9 +95,16 @@ button:disabled {
   font-weight: 600;
 }
 
-.radio-group {
+.radio-group,
+.checkbox-group {
   display: flex;
+  flex-wrap: wrap;
   gap: 16px;
+}
+
+.field-row .checkbox-group label {
+  min-width: 0;
+  font-weight: normal;
 }
 
 .status-text {
@@ -111,6 +118,31 @@ button:disabled {
   min-height: 1.2em;
 }
 
+.video-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 16px;
+}
+
+.video-grid.multi {
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+}
+
+.video-panel {
+  min-width: 0;
+}
+
+.video-panel-header {
+  font-weight: 600;
+  font-size: 0.9rem;
+  height: 1.5em;
+  line-height: 1.5em;
+  margin-bottom: 6px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 .video-wrapper {
   overflow: hidden;
   background: #000;
@@ -119,6 +151,10 @@ button:disabled {
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+.video-grid.multi .video-wrapper {
+  height: 320px;
 }
 
 .video-wrapper.zoomed {
